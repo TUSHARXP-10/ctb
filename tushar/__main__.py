@@ -38,13 +38,9 @@ def cmd_run(s: Settings, phone: bool = False) -> int:
         return 2
     import uvicorn
 
-    from .netutil import dashboard_urls
+    from .netutil import PHONE, dashboard_urls, login_link
     from .server import create_app
-    from .netutil import PHONE, access_key, login_link
-    if phone:
-        s.host = "0.0.0.0"
-        if not s.dashboard_password:
-            s.dashboard_password = access_key(s.data_dir)
+    ensure_access(s, phone)
     print(BANNER.format(v=__version__))
     print(f"  Mode: {s.mode_label} | Brain: {s.brain} ({s.claude_model}) | Desk: {s.desk_mode}")
     print(f"  On this computer:  http://127.0.0.1:{s.port}")
@@ -118,8 +114,16 @@ def _print_qr(text: str) -> None:
         print("  (QR not available here: open the dashboard on this computer and click the phone icon.)")
 
 
-def cmd_login(s: Settings) -> int:
-    """Open Claude Code so you can log in with your Pro/Max account (no separate install needed)."""
+def ensure_access(s: Settings, phone: bool) -> None:
+    """Phone mode listens on the network; anything reachable from outside always gets an access key."""
+    from .netutil import access_key
+    if phone:
+        s.host = "0.0.0.0"
+    if s.host not in ("127.0.0.1", "localhost") and not s.dashboard_password:
+        s.dashboard_password = access_key(s.data_dir)
+
+
+def claude_binary(s: Settings) -> str | None:
     path = s.claude_cli_path or shutil.which("claude")
     if not path:
         try:
@@ -132,6 +136,12 @@ def cmd_login(s: Settings) -> int:
                     break
         except ImportError:
             pass
+    return path
+
+
+def cmd_login(s: Settings) -> int:
+    """Open Claude Code so you can log in with your Pro/Max account (no separate install needed)."""
+    path = claude_binary(s)
     if not path:
         print("Claude Code not found. Install it from https://claude.ai/download or `npm i -g @anthropic-ai/claude-code`.")
         return 1
@@ -139,6 +149,19 @@ def cmd_login(s: Settings) -> int:
     print("then type /exit to come back. Tushar.ai will use that login.\n")
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
     return subprocess.call([path], env=env)
+
+
+def cmd_token(s: Settings) -> int:
+    """Create a long-lived Claude subscription token for running Tushar.ai on a server."""
+    path = claude_binary(s)
+    if not path:
+        print("Claude Code not found. Run `run.bat login` first, or install Claude Code.")
+        return 1
+    print("A browser opens: approve with your Claude Pro/Max account. Then copy the token it prints")
+    print("(starts with sk-ant-) and give it to the server installer as CLAUDE_CODE_OAUTH_TOKEN.")
+    print("Treat it like a password: it lets that server use your Claude subscription.\n")
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    return subprocess.call([path, "setup-token"], env=env)
 
 
 async def _doctor(s: Settings) -> int:
@@ -259,10 +282,11 @@ async def _cycle(s: Settings) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="tushar", description="Tushar.ai - Claude trades crypto futures")
-    ap.add_argument("command", nargs="?", default="run", choices=["run", "phone", "doctor", "cycle", "login"],
+    ap.add_argument("command", nargs="?", default="run",
+                    choices=["run", "phone", "doctor", "cycle", "login", "token"],
                     help="run = bot + dashboard (default); phone = same, reachable from your phone with a PIN; "
                          "doctor = check the setup; cycle = one Claude cycle in the terminal; "
-                         "login = log in to Claude")
+                         "login = log in to Claude; token = Claude token for a server")
     ap.add_argument("--env", help="path to a .env file")
     ap.add_argument("--log", default=os.environ.get("LOG_LEVEL", "INFO"))
     args = ap.parse_args(argv)
@@ -279,6 +303,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command == "login":
         return cmd_login(s)
+    if args.command == "token":
+        return cmd_token(s)
     if args.command == "doctor":
         return asyncio.run(_doctor(s))
     if args.command == "cycle":

@@ -48,3 +48,17 @@ async def test_tunnel_reports_url_and_failures(tmp_path):
     task2.cancel()
     t2.stop()
     assert state["tunnel"] == "failed" and any("Couldn't create" in s for s in said)
+
+
+def test_network_exposure_always_gets_a_key(tmp_path):
+    from tushar.__main__ import ensure_access
+    from .conftest import make_settings
+    s = make_settings(tmp_path)
+    ensure_access(s, phone=False)
+    assert s.host == "127.0.0.1" and s.dashboard_password == ""      # local only: no key needed
+    s.host = "0.0.0.0"
+    ensure_access(s, phone=False)
+    assert len(s.dashboard_password) == 14                           # reachable: key created
+    s2 = make_settings(tmp_path, dashboard_password="mine")
+    ensure_access(s2, phone=True)
+    assert s2.host == "0.0.0.0" and s2.dashboard_password == "mine"  # your own password wins

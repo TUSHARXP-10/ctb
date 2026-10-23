@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY tushar ./tushar
 
 # Run as a normal user (Claude Code refuses some modes as root)
-RUN useradd -m tushar && mkdir -p /app/data && chown -R tushar /app
+RUN useradd -m -u 1000 tushar && mkdir -p /app/data && chown -R tushar /app
 USER tushar
 
 VOLUME ["/app/data"]

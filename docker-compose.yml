@@ -6,7 +6,9 @@ services:
     env_file: .env
     environment:
       HOST: 0.0.0.0
+    # phone = also creates the secure https link for your phone (printed in `docker compose logs`)
+    command: ["python", "-m", "tushar", "${TUSHAR_MODE:-phone}"]
     ports:
-      - "127.0.0.1:8000:8000"   # change to "8000:8000" only with DASHBOARD_PASSWORD set
+      - "127.0.0.1:8000:8000"   # use "8000:8000" for http://SERVER-IP:8000 (the access key still protects it)
     volumes:
       - ./data:/app/data

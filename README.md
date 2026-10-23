@@ -265,17 +265,37 @@ message is a question for Tushar.
 
 ## Running 24/7
 
-The bot only trades while it is running. For round-the-clock trading, use a small VPS or an always-on PC.
+The bot only trades while it is running: on your PC (`run.bat phone`, keep the PC awake) or on a server.
 
-**Docker**
+### Why not Vercel (or Netlify, Cloudflare Pages...)
 
-```bash
-cp .env.example .env    # fill in Binance keys and CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)
-docker compose up -d --build
-docker compose logs -f
-```
+Those run short functions per web request and then stop. Tushar.ai is a robot that must stay on: it checks
+prices every few seconds, guards stops, runs Claude every 15 minutes and keeps its database on disk. Also,
+Vercel builds and runs in the US by default, and Binance blocks US IP addresses (users report many cloud
+providers' IPs are blocked too). Your home internet already works with Binance, so your PC is the most
+reliable place to run it.
 
-**Plain server**: `./run.sh` inside `tmux`/`screen`, or a systemd service.
+### On a cloud server (VPS)
+
+Any small Ubuntu server with 2 GB RAM (DigitalOcean, AWS Lightsail, Hetzner, Oracle Cloud...). Pick a
+region close to you; Binance blocks some providers' addresses, and the installer tests that **before** it
+starts trading.
+
+1. On your PC: `run.bat token`. Approve in the browser and copy the token it prints (starts with `sk-ant-`).
+2. On the server (SSH in), paste:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/TUSHARXP-10/ctb/main/deploy/install.sh | bash
+   ```
+
+   It installs Docker, asks for your Binance demo keys and the Claude token, runs the doctor check from
+   the server, then starts Tushar.ai with auto-restart and prints the https phone link + QR code.
+
+If the check reports that Binance blocks the server ("restricted location", HTTP 451), delete that server
+and try another provider or region, or keep running on your PC.
+
+**Docker by hand**: fill in `.env` (including `CLAUDE_CODE_OAUTH_TOKEN`), then `docker compose up -d --build`
+and `docker compose logs -f`.
 
 **Phone access**: keep the dashboard on `127.0.0.1` and use an SSH tunnel
 (`ssh -L 8000:127.0.0.1:8000 you@server`) or Tailscale. If you open the port, set `DASHBOARD_PASSWORD`.
@@ -288,6 +308,7 @@ docker compose logs -f
 ./run.sh            # bot + dashboard (this computer only)
 ./run.sh phone      # same, reachable from your phone on the same Wi-Fi, with a PIN
 ./run.sh login      # log in to Claude with your Pro/Max account
+./run.sh token      # make a Claude subscription token for a server
 ./run.sh doctor     # check Binance, news and the Claude login
 ./run.sh cycle      # run one Claude cycle in the terminal and print its thinking
 ```
@@ -327,7 +348,7 @@ tushar/
   exchange/         binance.py (demo/testnet/live), paper.py (simulated account), sim.py (synthetic market)
   server.py         FastAPI + WebSocket
   web/              the dashboard (no build step)
-tests/              75 offline tests
+tests/              76 offline tests
 ```
 
 ## Troubleshooting
