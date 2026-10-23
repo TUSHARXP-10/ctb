@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tushar.ai · Sign in</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .wrap { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+    .box { width: min(380px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 28px; text-align: center; }
+    .box input { width: 100%; margin: 18px 0 12px; background: var(--bg2); border: 1px solid var(--line2); color: var(--text); border-radius: 10px; padding: 11px 12px; font-size: 14px; }
+    .box .btn { width: 100%; justify-content: center; padding: 11px; }
+    .err { color: var(--red); font-size: 13px; min-height: 18px; margin-top: 10px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <form class="box" id="f">
+    <div class="logo" style="margin:0 auto 12px;width:48px;height:48px;font-size:24px">T</div>
+    <div class="brand-name" style="font-size:24px">Tushar<span>.ai</span></div>
+    <div class="muted" style="font-size:13px;margin-top:4px">Claude is the trader</div>
+    <input type="password" id="pw" placeholder="Dashboard password" autofocus autocomplete="current-password">
+    <button class="btn primary" type="submit">Sign in</button>
+    <div class="err" id="err"></div>
+  </form>
+</div>
+<script>
+  document.getElementById("f").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: document.getElementById("pw").value }) });
+    if (r.ok) location.href = "/"; else document.getElementById("err").textContent = "Wrong password";
+  });
+</script>
+</body>
+</html>

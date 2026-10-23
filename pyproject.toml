@@ -1,0 +1,32 @@
+[project]
+name = "tushar-ai"
+version = "1.0.0"
+description = "Tushar.ai - an autonomous crypto futures desk where Claude is the trader"
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "httpx>=0.27",
+  "feedparser>=6.0",
+  "python-dotenv>=1.0",
+  "numpy>=1.26",
+  "claude-agent-sdk>=0.1.30",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+tushar = "tushar.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["tushar*"]
+
+[tool.setuptools.package-data]
+tushar = ["web/*", "web/vendor/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

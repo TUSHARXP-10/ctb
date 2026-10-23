@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tushar.ai</title>
+  <meta name="theme-color" content="#07090f">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%238b6cff'/><stop offset='1' stop-color='%2319d3f5'/></linearGradient></defs><rect width='64' height='64' rx='16' fill='url(%23g)'/><text x='32' y='44' font-size='34' font-family='Arial' font-weight='900' text-anchor='middle' fill='%2307090f'>T</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">T</div>
+    <div>
+      <div class="brand-name">Tushar<span>.ai</span></div>
+      <div class="brand-sub">Claude is the trader</div>
+    </div>
+  </div>
+  <span class="badge mode" id="mode-badge">-</span>
+  <span class="badge" id="state-badge"><span class="dot"></span><span id="state-text">-</span></span>
+  <div class="claude-state" id="claude-state"><div class="claude-orb"></div><span class="claude-label" id="claude-label">Idle</span></div>
+  <div class="spacer"></div>
+  <div class="meta">
+    <span>Next cycle <b id="next-cycle" class="mono">-</b></span>
+    <span class="hide-sm">Brain <b id="brain-name">-</b></span>
+    <span class="hide-sm" id="usage-wrap" title="Claude subscription usage window">Usage <span class="usage-bar"><i id="usage-fill" style="width:0%"></i></span> <b id="usage-pct">-</b></span>
+  </div>
+  <div class="controls" style="display:flex;gap:6px;flex-wrap:wrap">
+    <button class="btn primary" id="btn-run" title="Run a Claude cycle now">&#9654; <span class="lbl">Run now</span></button>
+    <button class="btn" id="btn-pause" title="Pause / resume new trades">&#10074;&#10074; <span class="lbl">Pause</span></button>
+    <button class="btn danger" id="btn-kill" title="Close everything and stop">&#9888; <span class="lbl">Kill</span></button>
+    <button class="btn icon-btn" id="btn-settings" title="Settings">&#9881;</button>
+  </div>
+</header>
+
+<main>
+  <div id="banners"></div>
+
+  <section class="kpis">
+    <div class="kpi hero"><div class="label">Equity</div><div class="value" id="k-equity">-</div><div class="sub" id="k-equity-sub">&nbsp;</div></div>
+    <div class="kpi"><div class="label">Today</div><div class="value" id="k-today">-</div><div class="sub" id="k-today-sub">&nbsp;</div></div>
+    <div class="kpi"><div class="label">Unrealized</div><div class="value" id="k-upnl">-</div><div class="sub" id="k-upnl-sub">&nbsp;</div></div>
+    <div class="kpi"><div class="label">Available</div><div class="value" id="k-avail">-</div><div class="sub" id="k-avail-sub">&nbsp;</div></div>
+    <div class="kpi"><div class="label">Win rate</div><div class="value" id="k-winrate">-</div><div class="sub" id="k-winrate-sub">&nbsp;</div></div>
+    <div class="kpi"><div class="label">Total P&amp;L</div><div class="value" id="k-total">-</div><div class="sub" id="k-total-sub">&nbsp;</div></div>
+    <div class="kpi"><div class="label">Open risk</div><div class="value" id="k-risk">-</div><div class="sub" id="k-risk-sub">&nbsp;</div></div>
+  </section>
+
+  <section class="grid">
+    <div class="span-8 stack">
+      <div class="card">
+        <div class="card-h">
+          <select class="sym-select" id="sym-select"></select>
+          <div class="seg" id="iv-seg">
+            <button data-iv="5m">5m</button><button data-iv="15m" class="on">15m</button><button data-iv="1h">1h</button><button data-iv="4h">4h</button><button data-iv="1d">1D</button>
+          </div>
+          <div class="spacer"></div>
+          <span class="muted" style="font-size:12px" id="chart-hint">EMA 20 / 50 · Claude's entries &amp; exits</span>
+        </div>
+        <div id="chart"><div class="chart-legend" id="chart-legend"></div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h">
+          <div class="tabs" id="book-tabs">
+            <button data-tab="positions" class="on">Positions <span class="count" id="c-positions">0</span></button>
+            <button data-tab="orders">Orders <span class="count" id="c-orders">0</span></button>
+            <button data-tab="journal">Journal <span class="count" id="c-journal">0</span></button>
+            <button data-tab="cycles">Cycles</button>
+            <button data-tab="alerts">Alerts <span class="count" id="c-alerts">0</span></button>
+          </div>
+        </div>
+        <div class="card-b flush scroll" style="max-height:420px" id="book-body"></div>
+      </div>
+    </div>
+
+    <div class="span-4 stack">
+      <div class="card">
+        <div class="card-h"><h3>&#129504; Claude's mind</h3><span class="count" id="mind-count">live</span><div class="spacer"></div>
+          <button class="btn small ghost" id="mind-clear" title="Clear the view">Clear</button></div>
+        <div class="mind scroll" id="mind"></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>&#128301; Outlook</h3><div class="spacer"></div><span class="muted" style="font-size:11.5px" id="outlook-time"></span></div>
+        <div class="card-b" id="outlook"><div class="empty">Claude publishes its market view at the end of every cycle.</div></div>
+      </div>
+    </div>
+
+    <div class="span-4 card">
+      <div class="card-h"><h3>&#128200; Market watch</h3><div class="spacer"></div><span class="muted" style="font-size:11.5px">click to chart</span></div>
+      <div class="card-b flush scroll" style="max-height:380px"><table><thead><tr><th>Symbol</th><th class="num">Price</th><th class="num">24h</th><th class="num">Funding</th><th class="num">Vol</th></tr></thead><tbody id="watch"></tbody></table></div>
+    </div>
+    <div class="span-4 card">
+      <div class="card-h"><h3>&#128269; Scanner</h3><span class="count" id="scan-count">0</span><div class="spacer"></div>
+        <span class="muted" style="font-size:11.5px" id="scan-time"></span><button class="btn small" id="btn-scan">Rescan</button></div>
+      <div class="card-b flush scroll" style="max-height:380px" id="scanner"></div>
+    </div>
+    <div class="span-4 card">
+      <div class="card-h"><h3>&#128240; News</h3><span class="count" id="news-count">0</span><div class="spacer"></div><button class="btn small" id="btn-news">Refresh</button></div>
+      <div id="fng"></div>
+      <div class="card-b flush scroll" style="max-height:330px" id="news"></div>
+    </div>
+
+    <div class="span-6 card">
+      <div class="card-h"><h3>&#9203; Time Machine</h3><span class="muted" style="font-size:11.5px">10,000 replays from the coin's own 5m candles</span><div class="spacer"></div><span class="muted" style="font-size:11.5px" id="tm-time"></span></div>
+      <div class="card-b" id="tm"><div class="empty">Every trade Claude plans is replayed here before any money moves.</div></div>
+    </div>
+    <div class="span-6 card">
+      <div class="card-h"><h3>&#128176; Equity curve</h3><div class="spacer"></div><span class="muted mono" style="font-size:12px" id="eq-change"></span></div>
+      <div class="card-b"><div id="equity-chart" style="height:300px"></div></div>
+    </div>
+
+    <div class="span-6 card">
+      <div class="card-h"><h3>&#128218; Claude's memory</h3><span class="count" id="mem-count">0</span><div class="spacer"></div><span class="muted" style="font-size:11.5px">lessons Claude wrote for itself</span></div>
+      <div class="card-b flush scroll" style="max-height:340px" id="memory"></div>
+    </div>
+    <div class="span-6 card">
+      <div class="card-h"><h3>&#128202; Performance by setup</h3></div>
+      <div class="card-b flush scroll" style="max-height:340px" id="perf"></div>
+    </div>
+  </section>
+</main>
+
+<button class="fab" id="fab-chat">&#128172; Ask Tushar</button>
+<aside class="drawer" id="chat-drawer">
+  <div class="drawer-h"><div class="logo" style="width:28px;height:28px;font-size:14px">T</div><b>Ask Tushar</b><span class="muted" style="font-size:12px">chat with your trader</span><div class="spacer"></div><button class="btn small" id="chat-close">Close</button></div>
+  <div class="chat-log scroll" id="chat-log"></div>
+  <div class="chat-in"><textarea id="chat-input" placeholder="Why did you short ETH? What's your plan for BTC?"></textarea><button class="btn primary" id="chat-send">Send</button></div>
+</aside>
+
+<div class="overlay" id="settings-overlay">
+  <div class="modal">
+    <div class="modal-h"><h3>&#9881; Settings</h3><span class="muted" style="font-size:12px">changes apply live and are saved</span><div class="spacer"></div><button class="btn small" data-close>Close</button></div>
+    <div class="modal-b" id="settings-form"></div>
+    <div class="modal-h" style="border-top:1px solid var(--line);border-bottom:none;justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn primary" id="settings-save">Save</button></div>
+  </div>
+</div>
+<div class="overlay" id="cycle-overlay">
+  <div class="modal">
+    <div class="modal-h"><h3 id="cycle-title">Cycle</h3><div class="spacer"></div><button class="btn small" data-close>Close</button></div>
+    <div class="modal-b" id="cycle-body"></div>
+  </div>
+</div>
+<div class="toasts" id="toasts"></div>
+
+<script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

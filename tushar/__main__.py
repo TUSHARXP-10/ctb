@@ -1,0 +1,189 @@
+"""Command line: `python -m tushar [run|doctor|cycle]`."""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import os
+import sys
+import time
+
+from . import __version__
+from .config import Settings
+
+BANNER = r"""
+  _____         _                       _
+ |_   _|_ _ ___| |__   __ _ _ __   __ _(_)
+   | |/ _` / __| '_ \ / _` | '__| / _` | |
+   | | (_| \__ \ | | | (_| | | _ | (_| | |
+   |_|\__,_|___/_| |_|\__,_|_|(_) \__,_|_|   v{v}
+   Claude is the trader.
+"""
+
+
+def setup_logging(level: str = "INFO") -> None:
+    logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO),
+                        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s", datefmt="%H:%M:%S")
+    for noisy in ("httpx", "httpcore", "uvicorn.access"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+def cmd_run(s: Settings) -> int:
+    problems = s.validate_startup()
+    if problems:
+        for p in problems:
+            print(f"  x {p}")
+        return 2
+    import uvicorn
+
+    from .server import create_app
+    print(BANNER.format(v=__version__))
+    print(f"  Mode: {s.mode_label} | Brain: {s.brain} ({s.claude_model}) | Dashboard: http://{s.host}:{s.port}")
+    if s.host not in ("127.0.0.1", "localhost") and not s.dashboard_password:
+        print("  ! The dashboard is reachable from other machines and has no password. Set DASHBOARD_PASSWORD.")
+    uvicorn.run(create_app(s), host=s.host, port=s.port, log_level="warning")
+    return 0
+
+
+async def _doctor(s: Settings) -> int:
+    ok = True
+
+    def line(good: bool, text: str, optional: bool = False) -> None:
+        nonlocal ok
+        if not optional:
+            ok = ok and good
+        print(f"  {'OK ' if good else ('!! ' if optional else 'XX ')} {text}")
+
+    print(BANNER.format(v=__version__))
+    print(f"Mode: {s.mode_label}   Brain: {s.brain}   Model: {s.claude_model}\n")
+    for p in s.validate_startup():
+        line(False, p)
+
+    # --- market data / account ---
+    from .engine import Engine
+    try:
+        eng = Engine(s, db_path=":memory:")
+    except Exception as e:  # noqa: BLE001
+        line(False, f"engine setup: {e}")
+        return 1
+    try:
+        await eng.market.refresh_symbols()
+        await eng.market.refresh_prices()
+        btc = eng.market.price("BTCUSDT")
+        line(bool(btc), f"market data: {len(eng.market.symbols)} symbols, BTCUSDT mark {btc}")
+    except Exception as e:  # noqa: BLE001
+        line(False, f"market data: {e}")
+    if s.uses_exchange_account:
+        try:
+            await eng.broker.prepare()
+            acct = await eng.broker.account()
+            line(True, f"Binance {s.trading_mode} account: equity {acct.equity:,.2f} USDT, "
+                       f"available {acct.available:,.2f}, {len(acct.positions)} open position(s)"
+                       + (" (hedge mode)" if eng.broker.hedge_mode else " (one-way mode)"))
+            orders = await eng.broker.open_orders()
+            line(True, f"open orders readable ({len(orders)}); algo order API "
+                       f"{'available' if eng.broker.algo_supported else 'missing (classic fallback)'}")
+        except Exception as e:  # noqa: BLE001
+            line(False, f"Binance account: {e}")
+    else:
+        acct = await eng.broker.account()
+        line(True, f"paper account: equity {acct.equity:,.2f} USDT")
+
+    # --- news ---
+    try:
+        n = await eng.news.refresh()
+        good = [k for k, v in eng.news.status.items() if v.startswith("ok")]
+        line(bool(good), f"news: {len(good)}/{len(eng.news.status)} feeds reachable, {n} headlines"
+                         + ("" if good else " (optional: Claude can still use web search)"), optional=True)
+    except Exception as e:  # noqa: BLE001
+        line(False, f"news: {e}", optional=True)
+
+    # --- Claude ---
+    if s.brain == "mock":
+        line(True, "brain: mock (no Claude calls)")
+    else:
+        try:
+            from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, SystemMessage, TextBlock, query
+            opts = ClaudeAgentOptions(tools=[], max_turns=1, model=s.claude_model or None, setting_sources=[],
+                                      cli_path=s.claude_cli_path or None, permission_mode="dontAsk")
+            started = time.time()
+            auth, text, err = None, "", None
+            async for msg in query(prompt="Reply with exactly: TUSHAR OK", options=opts):
+                if isinstance(msg, SystemMessage) and msg.subtype == "init":
+                    auth = msg.data.get("apiKeySource")
+                elif isinstance(msg, AssistantMessage):
+                    text += "".join(b.text for b in msg.content if isinstance(b, TextBlock))
+                    if getattr(msg, "error", None):
+                        err = msg.error
+                elif isinstance(msg, ResultMessage) and msg.is_error:
+                    err = msg.result or msg.subtype
+            good = "TUSHAR OK" in text and not err
+            line(good, f"Claude answered in {time.time() - started:.1f}s: {text.strip()[:60]!r}"
+                       + (f" error={err}" if err else ""))
+            if auth in (None, "none", "/login managed key"):
+                line(True, f"Claude auth: subscription login (apiKeySource={auth})")
+            else:
+                line(False, f"Claude auth source is {auth}: that bills an API key. Unset it to use your subscription.")
+        except Exception as e:  # noqa: BLE001
+            line(False, f"Claude: {e}. Run `claude` once and log in with your Pro/Max account, "
+                        "or set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`).")
+    await eng.source.close()
+    print("\nAll good. Start with: python -m tushar" if ok else "\nFix the XX lines above, then run again.")
+    return 0 if ok else 1
+
+
+async def _cycle(s: Settings) -> int:
+    from .engine import Engine
+    eng = Engine(s)
+    await eng.start(loops=False)
+
+    q = eng.bus.subscribe()
+
+    async def printer():
+        while True:
+            m = await q.get()
+            d = m.get("data") or {}
+            if m["type"] in ("thought", "thinking"):
+                print(f"\n[{m['type']}] {d.get('text', '')}")
+            elif m["type"] == "tool_call":
+                print(f"  -> {d.get('name')} {d.get('input')}")
+            elif m["type"] == "tool_result":
+                print(f"  <- {str(d.get('text', ''))[:300]}")
+            elif m["type"] in ("trade_open", "trade_close", "notice"):
+                print(f"  ** {m['type']}: {d}")
+
+    t = asyncio.create_task(printer())
+    res = await eng.run_cycle("manual (command line)")
+    await asyncio.sleep(0.2)
+    t.cancel()
+    print(f"\nCycle #{res['cycle_id']} {res['status']}" + (f": {res['error']}" if res.get("error") else ""))
+    await eng.stop()
+    return 0 if res["status"] == "done" else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="tushar", description="Tushar.ai - Claude trades crypto futures")
+    ap.add_argument("command", nargs="?", default="run", choices=["run", "doctor", "cycle"],
+                    help="run the dashboard + bot (default), check the setup, or run one cycle in the terminal")
+    ap.add_argument("--env", help="path to a .env file")
+    ap.add_argument("--log", default=os.environ.get("LOG_LEVEL", "INFO"))
+    args = ap.parse_args(argv)
+    setup_logging(args.log)
+    try:
+        s = Settings.from_env(args.env)
+    except ValueError as e:
+        print(f"Config error: {e}")
+        return 2
+    if args.command == "doctor":
+        return asyncio.run(_doctor(s))
+    if args.command == "cycle":
+        problems = s.validate_startup()
+        if problems:
+            print("\n".join(problems))
+            return 2
+        return asyncio.run(_cycle(s))
+    return cmd_run(s)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

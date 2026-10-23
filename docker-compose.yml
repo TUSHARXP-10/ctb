@@ -1,0 +1,12 @@
+services:
+  tushar:
+    build: .
+    container_name: tushar-ai
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:8000:8000"   # change to "8000:8000" only with DASHBOARD_PASSWORD set
+    volumes:
+      - ./data:/app/data
