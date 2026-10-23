@@ -275,21 +275,28 @@ Vercel builds and runs in the US by default, and Binance blocks US IP addresses 
 providers' IPs are blocked too). Your home internet already works with Binance, so your PC is the most
 reliable place to run it.
 
-### On a cloud server (VPS)
+### On a cloud server (VPS): no PC needed, everything from your phone
 
 Any small Ubuntu server with 2 GB RAM (DigitalOcean, AWS Lightsail, Hetzner, Oracle Cloud...). Pick a
 region close to you; Binance blocks some providers' addresses, and the installer tests that **before** it
 starts trading.
 
-1. On your PC: `run.bat token`. Approve in the browser and copy the token it prints (starts with `sk-ant-`).
-2. On the server (SSH in), paste:
+1. **New Binance demo key** (on the phone): demo.binance.com > API Management > Create API, tick
+   Reading + Futures, and keep the page open (the secret is shown only once).
+2. **Create the server** in the provider's website, e.g. DigitalOcean > Create > Droplets > Ubuntu 24.04,
+   region Bangalore, 2 GB RAM. Then open its browser **Console** (no SSH app needed).
+3. **Paste:**
 
    ```bash
    curl -fsSL https://raw.githubusercontent.com/TUSHARXP-10/ctb/main/deploy/install.sh | bash
    ```
 
-   It installs Docker, asks for your Binance demo keys and the Claude token, runs the doctor check from
-   the server, then starts Tushar.ai with auto-restart and prints the https phone link + QR code.
+   It installs Docker, asks for the Binance keys (paste them), then shows a Claude link: open it on your
+   phone, approve with your Claude account, paste the code back. It checks Binance from the server and
+   starts Tushar.ai with auto-restart, then prints your https phone link and access key.
+
+Already have a token from a PC (`run.bat token`)? Put it in the server's `.env` as `CLAUDE_CODE_OAUTH_TOKEN`
+and the login step is skipped.
 
 If the check reports that Binance blocks the server ("restricted location", HTTP 451), delete that server
 and try another provider or region, or keep running on your PC.
@@ -348,7 +355,7 @@ tushar/
   exchange/         binance.py (demo/testnet/live), paper.py (simulated account), sim.py (synthetic market)
   server.py         FastAPI + WebSocket
   web/              the dashboard (no build step)
-tests/              76 offline tests
+tests/              77 offline tests
 ```
 
 ## Troubleshooting

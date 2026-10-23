@@ -62,3 +62,23 @@ def test_network_exposure_always_gets_a_key(tmp_path):
     s2 = make_settings(tmp_path, dashboard_password="mine")
     ensure_access(s2, phone=True)
     assert s2.host == "0.0.0.0" and s2.dashboard_password == "mine"  # your own password wins
+
+
+def test_token_extraction_and_loading(tmp_path, monkeypatch):
+    from tushar.__main__ import find_token, load_saved_token, token_file
+    from .conftest import make_settings
+    tok = "sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz_0123456789-abc"
+    out = f"\x1b[32mCreated!\x1b[0m\nYour OAuth token:\n\x1b[33m{tok}\x1b[0m\nStore it securely."
+    assert find_token(out) == tok
+    wrapped = f"token:\n{tok[:30]}\n{tok[30:]}\n"           # a narrow terminal wrapped it
+    assert find_token(wrapped) == tok
+    assert find_token("no token here") is None
+    s = make_settings(tmp_path)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    token_file(s).write_text(tok)
+    load_saved_token(s)
+    import os
+    assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == tok
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "from-env")
+    load_saved_token(s)
+    assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "from-env"   # an explicit setting wins

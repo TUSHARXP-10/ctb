@@ -13,3 +13,4 @@ build/
 dist/
 .DS_Store
 access_key.txt
+claude_token.txt

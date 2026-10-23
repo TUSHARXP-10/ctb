@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -151,17 +152,119 @@ def cmd_login(s: Settings) -> int:
     return subprocess.call([path], env=env)
 
 
-def cmd_token(s: Settings) -> int:
-    """Create a long-lived Claude subscription token for running Tushar.ai on a server."""
+TOKEN_RE = re.compile(r"sk-ant-oat\d*-[A-Za-z0-9_\-]{20,}")
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]")
+
+
+TOKEN_CHARS = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
+def find_token(text: str) -> str | None:
+    """Pull the Claude token out of `claude setup-token` output, even if a narrow screen wrapped it."""
+    clean = ANSI_RE.sub("", text).replace("\r", "\n")
+    clean = re.sub(r"[\u2500-\u257f]", " ", clean)           # box-drawing borders
+    lines = [ln.strip() for ln in clean.split("\n")]
+    for i, ln in enumerate(lines):
+        start = ln.find("sk-ant-oat")
+        if start < 0:
+            continue
+        m = re.match(r"[A-Za-z0-9_\-]+", ln[start:])
+        tok = m.group(0) if m else ""
+        if start + len(tok) == len(ln):                        # token ran to the edge: it may continue
+            for nxt in lines[i + 1:]:
+                if not nxt or not TOKEN_CHARS.match(nxt):
+                    break
+                tok += nxt
+        if TOKEN_RE.fullmatch(tok):
+            return tok
+    return None
+
+
+def _run_in_wide_terminal(argv: list[str], env: dict, cols: int = 400) -> bytes:
+    """Run an interactive program in a wide pseudo-terminal (so long tokens never wrap), relaying
+    keyboard input and showing its output, and return everything it printed."""
+    import fcntl
+    import select
+    import struct
+    import termios
+    import tty
+    master, slave = os.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, cols, 0, 0))
+    proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True)
+    os.close(slave)
+    captured = bytearray()
+    in_fd, out_fd = sys.stdin.fileno(), sys.stdout.fileno()
+    saved = termios.tcgetattr(in_fd) if os.isatty(in_fd) else None
+    if saved:
+        tty.setraw(in_fd)
+    try:
+        while True:
+            ready, _, _ = select.select([master, in_fd], [], [], 0.25)
+            if master in ready:
+                try:
+                    data = os.read(master, 4096)
+                except OSError:
+                    data = b""
+                if not data:
+                    break
+                captured.extend(data)
+                os.write(out_fd, data)
+            if in_fd in ready:
+                data = os.read(in_fd, 1024)
+                if data:
+                    os.write(master, data)
+            if not ready and proc.poll() is not None:
+                break
+    finally:
+        if saved:
+            termios.tcsetattr(in_fd, termios.TCSADRAIN, saved)
+        os.close(master)
+        proc.wait()
+    return bytes(captured)
+
+
+def token_file(s: Settings):
+    from pathlib import Path
+    return Path(s.data_dir) / "claude_token.txt"
+
+
+def load_saved_token(s: Settings) -> None:
+    """Use a token saved by `token --save` when CLAUDE_CODE_OAUTH_TOKEN isn't set."""
+    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return
+    f = token_file(s)
+    if f.exists():
+        tok = f.read_text().strip()
+        if tok:
+            os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = tok
+
+
+def cmd_token(s: Settings, save: bool = False) -> int:
+    """Create a long-lived Claude subscription token (for a server, or to skip `login`)."""
     path = claude_binary(s)
     if not path:
         print("Claude Code not found. Run `run.bat login` first, or install Claude Code.")
         return 1
-    print("A browser opens: approve with your Claude Pro/Max account. Then copy the token it prints")
-    print("(starts with sk-ant-) and give it to the server installer as CLAUDE_CODE_OAUTH_TOKEN.")
-    print("Treat it like a password: it lets that server use your Claude subscription.\n")
-    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-    return subprocess.call([path, "setup-token"], env=env)
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")}
+    print("Approve with your Claude Pro/Max account. On a server with no browser: open the link it shows")
+    print("on your phone, approve, then paste the code back here.\n")
+    if not save or sys.platform == "win32":
+        print("Copy the token it prints (starts with sk-ant-). Treat it like a password.\n")
+        return subprocess.call([path, "setup-token"], env=env)
+    captured = _run_in_wide_terminal([path, "setup-token"], env)
+    tok = find_token(captured.decode(errors="replace"))
+    if not tok:
+        print("\nNo token found in the output. Run it again, or paste the token into .env as CLAUDE_CODE_OAUTH_TOKEN.")
+        return 1
+    f = token_file(s)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(tok)
+    try:
+        f.chmod(0o600)
+    except OSError:
+        pass
+    print(f"\nSaved. Tushar.ai will use this Claude login from now on ({f}).")
+    return 0
 
 
 async def _doctor(s: Settings) -> int:
@@ -289,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
                          "login = log in to Claude; token = Claude token for a server")
     ap.add_argument("--env", help="path to a .env file")
     ap.add_argument("--log", default=os.environ.get("LOG_LEVEL", "INFO"))
+    ap.add_argument("--save", action="store_true", help="token: save it into the data folder for Tushar.ai to use")
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):  # Windows consoles: never crash on an emoji
         try:
@@ -304,7 +408,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "login":
         return cmd_login(s)
     if args.command == "token":
-        return cmd_token(s)
+        return cmd_token(s, save=args.save)
+    load_saved_token(s)
     if args.command == "doctor":
         return asyncio.run(_doctor(s))
     if args.command == "cycle":
