@@ -96,12 +96,16 @@ run.bat                 :: first run: installs everything and creates .env, then
 notepad .env            :: paste BINANCE_API_KEY and BINANCE_API_SECRET (use the Copy buttons on demo.binance.com)
 run.bat login           :: opens Claude Code: log in with your Pro/Max account, then type /exit
 run.bat doctor          :: checks Binance, news and Claude
-run.bat phone           :: starts trading; prints a link + PIN for your phone
+run.bat phone           :: starts trading + opens the dashboard with a QR code for your phone
 ```
 
-On your phone (same Wi-Fi), open the link it prints (like `http://192.168.1.23:8000`) and enter the PIN.
-Or click the **phone icon** in the dashboard on your PC and scan the QR code. Add it to your home screen
-and it opens like an app. If Windows asks about the firewall, allow Python on **private networks**.
+**Phone:** `run.bat phone` creates a secure `https://....trycloudflare.com` link (free Cloudflare tunnel,
+downloaded automatically the first time). It works on Wi-Fi **or mobile data**, with no router or firewall
+setup. Your PC's browser opens the dashboard with a QR code: point your phone's camera at it, tap the link,
+and you're logged in. The black window also prints the link, an access key and the same QR code. Then use
+"Add to Home Screen" and it opens like an app.
+
+Never type `localhost` on the phone: on a phone, localhost means the phone itself.
 
 The bot only trades while that window is open and the PC is awake. Set Windows sleep to "Never" while it runs.
 
@@ -227,7 +231,8 @@ Everything lives in `.env` (see `.env.example`). The main settings:
 | `MAX_DAILY_LOSS_PCT` | `6` | halts new entries for the day |
 | `MIN_REWARD_RISK` | `1.5` | |
 | `TM_GATE` / `TM_MIN_AVG_R` | `true` / `-0.15` | Time Machine veto threshold (average R after fees) |
-| `DASHBOARD_PASSWORD` | empty | required if the dashboard is reachable from other devices |
+| `DASHBOARD_PASSWORD` | empty | your own password; if empty, phone mode makes a strong access key (kept in `data/access_key.txt`) |
+| `PHONE_TUNNEL` | `true` | phone mode also opens the secure Cloudflare link |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty | phone alerts and commands (see below) |
 | `LIQUIDATION_RADAR` | `true` | listen to Binance's public liquidation stream |
 | `DAILY_REPORT` / `DAILY_REPORT_HOUR_UTC` | `true` / `0` | Claude's end-of-day diary |
@@ -322,7 +327,7 @@ tushar/
   exchange/         binance.py (demo/testnet/live), paper.py (simulated account), sim.py (synthetic market)
   server.py         FastAPI + WebSocket
   web/              the dashboard (no build step)
-tests/              72 offline tests
+tests/              75 offline tests
 ```
 
 ## Troubleshooting
@@ -335,7 +340,8 @@ tests/              72 offline tests
 | HTTP 451 from Binance | Binance is not available from your location or server region |
 | Stop/target errors | `doctor` shows whether the Algo Order API is available; Tushar.ai falls back automatically and enforces stops itself |
 | News panel empty | your network blocks the RSS feeds; Claude can still use web search |
-| Phone can't open the link | same Wi-Fi? Windows firewall: allow Python on private networks; some routers block devices from seeing each other ("AP isolation"): use Tailscale instead |
+| Phone can't open the dashboard | start with `run.bat phone` (plain `run.bat` is PC-only), then scan the QR or open the `trycloudflare.com` link it prints; don't type `localhost` on the phone |
+| "Couldn't create the internet phone link" | your network blocks Cloudflare tunnels: use the "Same Wi-Fi link" it prints (phone on the same Wi-Fi, allow Python in Windows Firewall), or Tailscale / Telegram |
 | Claude Code on Windows asks for Git Bash | install [Git for Windows](https://git-scm.com/download/win) and run `run.bat login` again |
 
 ---

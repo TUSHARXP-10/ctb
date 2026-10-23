@@ -32,3 +32,30 @@ def dashboard_urls(host: str, port: int) -> list[str]:
     if host in ("127.0.0.1", "localhost"):
         return []
     return [f"http://{host}:{port}"]
+
+
+# Shared with the web server: the public phone link once the tunnel is up.
+PHONE: dict = {"public_url": None, "tunnel": "off"}
+
+_KEY_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"   # no 0/o/1/l/i: easy to read and type
+
+
+def access_key(data_dir: str) -> str:
+    """Strong dashboard key (xxxx-xxxx-xxxx), kept across restarts so the phone stays logged in."""
+    import secrets
+    from pathlib import Path
+    path = Path(data_dir) / "access_key.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        key = path.read_text().strip()
+        if len(key) >= 12:
+            return key
+    key = "-".join("".join(secrets.choice(_KEY_ALPHABET) for _ in range(4)) for _ in range(3))
+    path.write_text(key)
+    return key
+
+
+def login_link(base_url: str, key: str, next_path: str = "/") -> str:
+    """A link that logs in automatically (the key travels in the #fragment, never in server logs)."""
+    from urllib.parse import quote
+    return f"{base_url.rstrip('/')}/login#k={quote(key)}&next={quote(next_path)}"

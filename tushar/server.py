@@ -109,14 +109,21 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None, s
     async def login_page():
         return FileResponse(WEB / "login.html")
 
+    failures: list[float] = []
+
     @app.post("/api/login")
     async def login(request: Request):
+        now = time.time()
+        failures[:] = [t for t in failures if now - t < 600]
+        if len(failures) >= 10:
+            return JSONResponse({"ok": False, "error": "too many attempts, wait 10 minutes"}, status_code=429)
         body = await request.json()
-        if not settings.dashboard_password or hmac.compare_digest(str(body.get("password", "")),
+        if not settings.dashboard_password or hmac.compare_digest(str(body.get("password", "")).strip(),
                                                                   settings.dashboard_password):
             resp = JSONResponse({"ok": True})
             resp.set_cookie("tushar_session", session_token(), httponly=True, samesite="lax", max_age=30 * 86400)
             return resp
+        failures.append(now)
         await asyncio.sleep(1.0)
         return JSONResponse({"ok": False, "error": "wrong password"}, status_code=401)
 
@@ -154,9 +161,15 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None, s
 
     @app.get("/api/network")
     async def network(request: Request):
-        from .netutil import dashboard_urls
-        return {"host": settings.host, "port": settings.port, "urls": dashboard_urls(settings.host, settings.port),
-                "password_set": bool(settings.dashboard_password), "phone_ready": settings.host not in ("127.0.0.1", "localhost")}
+        from .netutil import PHONE, dashboard_urls, login_link
+        urls = dashboard_urls(settings.host, settings.port)
+        key = settings.dashboard_password
+        public = PHONE.get("public_url")
+        return {"host": settings.host, "port": settings.port, "urls": urls, "password_set": bool(key),
+                "phone_ready": settings.host not in ("127.0.0.1", "localhost"),
+                "public_url": public, "tunnel": PHONE.get("tunnel"),
+                "public_login": login_link(public, key) if public and key else public,
+                "lan_login": login_link(urls[0], key) if urls and key else (urls[0] if urls else None)}
 
     @app.get("/api/symbols")
     async def symbols(request: Request):

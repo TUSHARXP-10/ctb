@@ -5,7 +5,6 @@ import argparse
 import asyncio
 import logging
 import os
-import secrets
 import shutil
 import subprocess
 import sys
@@ -41,40 +40,82 @@ def cmd_run(s: Settings, phone: bool = False) -> int:
 
     from .netutil import dashboard_urls
     from .server import create_app
+    from .netutil import PHONE, access_key, login_link
     if phone:
         s.host = "0.0.0.0"
-        if not s.dashboard_password:  # a 6-digit PIN, kept across restarts so your phone stays logged in
-            from pathlib import Path
-            pin_file = Path(s.data_dir) / "phone_pin.txt"
-            pin_file.parent.mkdir(parents=True, exist_ok=True)
-            pin = pin_file.read_text().strip() if pin_file.exists() else ""
-            if not (pin.isdigit() and len(pin) == 6):
-                pin = f"{secrets.randbelow(10**6):06d}"
-                pin_file.write_text(pin)
-            s.dashboard_password = pin
+        if not s.dashboard_password:
+            s.dashboard_password = access_key(s.data_dir)
     print(BANNER.format(v=__version__))
     print(f"  Mode: {s.mode_label} | Brain: {s.brain} ({s.claude_model}) | Desk: {s.desk_mode}")
     print(f"  On this computer:  http://127.0.0.1:{s.port}")
     urls = dashboard_urls(s.host, s.port)
     if urls or phone:
-        print("  On your phone (same Wi-Fi):  " + ("   or   ".join(urls) if urls else
+        print("  Same Wi-Fi link:   " + ("   or   ".join(urls) if urls else
               f"http://<this computer's IPv4 address>:{s.port}  (find it with `ipconfig`)"))
-        print(f"  Password / PIN: {s.dashboard_password}" if s.dashboard_password else
+        print(f"  Access key:        {s.dashboard_password}" if s.dashboard_password else
               "  ! No DASHBOARD_PASSWORD set: anyone on your network can open the dashboard.")
-        print("  Tip: on the computer, click the phone icon in the dashboard to get a QR code.")
-        if sys.platform == "win32":
-            print("  Windows: if a firewall prompt appears, allow Python on PRIVATE networks.")
+        if phone and s.phone_tunnel:
+            print("  Creating a secure link that works on mobile data too (a few seconds)...")
     elif not phone:
         print("  Want it on your phone? Start with:  run.bat phone   (or ./run.sh phone)")
+    print("  (On the phone never type 'localhost': that means the phone itself.)")
     print()
-    # Run the server on the default event loop: on Windows that is the Proactor loop, which can start
-    # the Claude Code subprocess (older uvicorn versions forced a loop that cannot).
-    config = uvicorn.Config(create_app(s), host=s.host, port=s.port, log_level="warning", loop="none")
+
+    def announce(url: str) -> None:
+        PHONE["public_url"] = url
+        link = login_link(url, s.dashboard_password)
+        bar = "=" * 66
+        print(f"\n  {bar}\n  OPEN ON YOUR PHONE  (Wi-Fi or mobile data, from anywhere)\n\n      {url}\n")
+        print(f"  Access key: {s.dashboard_password}    Scan this QR to log in automatically:\n")
+        _print_qr(link)
+        print(f"  The link changes each time you start phone mode.\n  {bar}\n", flush=True)
+
+    async def serve() -> None:
+        # The default event loop on Windows is the Proactor loop, which can start the Claude Code
+        # subprocess (older uvicorn versions forced a loop that cannot), so uvicorn uses loop="none".
+        config = uvicorn.Config(create_app(s), host=s.host, port=s.port, log_level="warning", loop="none")
+        server = uvicorn.Server(config)
+        tunnel = None
+        extra: list[asyncio.Task] = []
+        if phone and s.phone_tunnel:
+            from .tunnel import Tunnel
+            tunnel = Tunnel(s.port, s.data_dir, announce, state=PHONE)
+            PHONE["tunnel"] = "starting"
+            extra.append(asyncio.create_task(tunnel.run()))
+        if phone:
+            async def open_browser() -> None:
+                await asyncio.sleep(4)
+                local = login_link(f"http://127.0.0.1:{s.port}", s.dashboard_password, "/?phone=1")
+                try:
+                    import webbrowser
+                    webbrowser.open(local)
+                except Exception:  # noqa: BLE001
+                    pass
+            extra.append(asyncio.create_task(open_browser()))
+        try:
+            await server.serve()
+        finally:
+            for t in extra:
+                t.cancel()
+            if tunnel:
+                tunnel.stop()
+
     try:
-        asyncio.run(uvicorn.Server(config).serve())
+        asyncio.run(serve())
     except KeyboardInterrupt:
         pass
     return 0
+
+
+def _print_qr(text: str) -> None:
+    try:
+        import qrcode
+        qr = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_L)
+        qr.add_data(text)
+        qr.make(fit=True)
+        qr.print_ascii(invert=True)
+    except Exception:  # noqa: BLE001  (no qrcode package or a console that can't draw it)
+        print("  (QR not available here: open the dashboard on this computer and click the phone icon.)")
 
 
 def cmd_login(s: Settings) -> int:

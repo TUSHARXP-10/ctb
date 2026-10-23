@@ -100,6 +100,7 @@ class Settings:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     liquidation_radar: bool = True
+    phone_tunnel: bool = True           # phone mode also opens a secure https link (Cloudflare quick tunnel)
 
     # ---- runtime (dashboard-editable) ----
     claude_model: str = "sonnet"

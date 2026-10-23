@@ -28,17 +28,22 @@
     <div class="logo" style="margin:0 auto 12px;width:48px;height:48px;font-size:24px">T</div>
     <div class="brand-name" style="font-size:24px">Tushar<span>.ai</span></div>
     <div class="muted" style="font-size:13px;margin-top:4px">Claude is the trader</div>
-    <input type="password" id="pw" placeholder="Dashboard password or PIN" autofocus autocomplete="current-password" inputmode="text">
+    <input type="password" id="pw" placeholder="Access key (shown in the PC window)" autofocus autocomplete="current-password" inputmode="text">
     <button class="btn primary" type="submit">Sign in</button>
     <div class="err" id="err"></div>
   </form>
 </div>
 <script>
-  document.getElementById("f").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: document.getElementById("pw").value }) });
-    if (r.ok) location.href = "/"; else document.getElementById("err").textContent = "Wrong password";
-  });
+  const params = new URLSearchParams(location.hash.slice(1));
+  const next = (params.get("next") || "/").startsWith("/") ? (params.get("next") || "/") : "/";
+  async function login(pw) {
+    const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pw }) });
+    if (r.ok) { location.replace(next); return; }
+    const d = await r.json().catch(() => ({}));
+    document.getElementById("err").textContent = r.status === 429 ? "Too many attempts. Wait 10 minutes." : (d.error === "wrong password" ? "Wrong access key" : "Login failed");
+  }
+  document.getElementById("f").addEventListener("submit", (e) => { e.preventDefault(); login(document.getElementById("pw").value.trim()); });
+  if (params.get("k")) { history.replaceState(null, "", "/login"); document.getElementById("pw").value = params.get("k"); login(params.get("k")); }
 </script>
 </body>
 </html>

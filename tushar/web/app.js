@@ -963,36 +963,50 @@
     voiceBtn(); if (voice) speak("Tushar voice is on."); toast(voice ? "Voice announcements on" : "Voice off");
   };
   $("btn-corr").onclick = loadCorr;
-  $("btn-phone").onclick = async () => {
+  function qrSvg(text, cell = 6) {
+    try { const qr = qrcode(0, "L"); qr.addData(text); qr.make(); return qr.createSvgTag(cell, 3); } catch (e) { return ""; }
+  }
+  let phoneTimer = null;
+  async function renderPhone() {
     let n;
-    try { n = await api("/api/network"); } catch (e) { toast(e.message, "bad"); return; }
-    const here = location.hostname !== "127.0.0.1" && location.hostname !== "localhost" ? `${location.protocol}//${location.host}` : null;
-    const urls = n.urls && n.urls.length ? n.urls : (here ? [here] : []);
+    try { n = await api("/api/network"); } catch (e) { $("phone-body").innerHTML = `<div class="banner err">${esc(e.message)}</div>`; return; }
+    const remote = location.hostname !== "127.0.0.1" && location.hostname !== "localhost";
     let html;
-    if (!n.phone_ready && !here) {
-      html = `<p style="line-height:1.6">The dashboard is only listening on this computer right now. Stop it (Ctrl+C) and start it in phone mode:</p>
-        <div class="ev-log" style="font-size:14px;color:var(--text)">run.bat phone</div>
-        <p class="muted" style="font-size:12.5px;line-height:1.6">Mac/Linux: <code>./run.sh phone</code>. It prints a link and a PIN. Then click this button again for a QR code. Your phone must be on the same Wi-Fi.</p>`;
-    } else if (!urls.length) {
-      html = `<p>No Wi-Fi/LAN address found on this computer.</p>`;
+    if (!n.phone_ready && !remote) {
+      html = `<p style="line-height:1.6">The dashboard is only open on this computer right now. Close the black window (or press Ctrl+C in it) and start phone mode:</p>
+        <div class="ev-log" style="font-size:15px;color:var(--text)">run.bat phone</div>
+        <p class="muted" style="font-size:12.5px;line-height:1.6">Mac/Linux: <code>./run.sh phone</code>. This page then opens by itself with a QR code for your phone.</p>`;
     } else {
-      const url = urls[0];
-      let svg = "";
-      try { const qr = qrcode(0, "M"); qr.addData(url); qr.make(); svg = qr.createSvgTag(7, 3); } catch (e) { svg = ""; }
-      html = `<div style="text-align:center"><div style="background:#fff;display:inline-block;padding:10px;border-radius:14px">${svg}</div>
-        <div class="mono" style="font-size:16px;margin:12px 0 4px"><b>${esc(url)}</b></div>
-        ${urls.slice(1).map((u) => `<div class="mono muted" style="font-size:12px">or ${esc(u)}</div>`).join("")}</div>
+      const link = n.public_login || n.lan_login;
+      const shown = n.public_url || (n.urls && n.urls[0]) || "";
+      const waiting = !n.public_url && ["starting", "connecting", "reconnecting"].includes(n.tunnel);
+      html = `<div style="text-align:center">
+          <div style="margin-bottom:10px">${n.public_url ? `<span class="pill ok">works on Wi-Fi and mobile data</span>` : waiting ? `<span class="pill run">creating the internet link... (Wi-Fi link below works now)</span>` : `<span class="pill neutral">same Wi-Fi only</span>`}</div>
+          <div style="background:#fff;display:inline-block;padding:10px;border-radius:14px">${link ? qrSvg(link) : ""}</div>
+          <div class="mono" style="font-size:14px;margin:12px 0 2px;word-break:break-all"><b>${esc(shown)}</b></div>
+          ${n.password_set ? `<div class="muted" style="font-size:12px">The QR logs you in. Typing the link instead? Use the access key from the PC window.</div>` : ""}
+        </div>
         <ol style="line-height:1.7;font-size:13px;margin:14px 0 0;padding-left:20px">
-          <li>Connect your phone to the <b>same Wi-Fi</b> as this computer.</li>
-          <li>Scan the QR code with the camera and open the link.</li>
-          <li>${n.password_set ? "Enter the dashboard password / PIN shown in the terminal." : "<span class='down'>No password is set: anyone on this Wi-Fi can open it.</span>"}</li>
-          <li>Tap <b>Share &gt; Add to Home Screen</b> (iPhone) or <b>&#8942; &gt; Add to Home screen</b> (Android) to use it like an app.</li>
+          <li>Open your phone's <b>camera</b> and point it at the QR code.</li>
+          <li>Tap the link that pops up. You're in.</li>
+          <li>Tap <b>Share &gt; Add to Home Screen</b> (iPhone) or <b>&#8942; &gt; Add to Home screen</b> (Android) to keep it like an app.</li>
         </ol>
-        <p class="muted" style="font-size:12px;line-height:1.6;margin-top:10px">Doesn't load? Allow Python through the Windows firewall on private networks. Away from home? Use Tailscale on both devices, or the Telegram bot.</p>`;
+        ${n.public_url && n.urls && n.urls.length ? `<p class="muted" style="font-size:12px;margin-top:10px">Same Wi-Fi alternative: <span class="mono">${esc(n.urls[0])}</span></p>` : ""}
+        ${!n.public_url ? `<p class="muted" style="font-size:12px;line-height:1.6;margin-top:10px">Wi-Fi link not loading? Phone must be on the same Wi-Fi (not mobile data), and Windows Firewall must allow Python. The internet link avoids both.</p>` : ""}`;
+      clearTimeout(phoneTimer);
+      if (waiting && $("phone-overlay").classList.contains("open")) phoneTimer = setTimeout(renderPhone, 2500);
     }
     $("phone-body").innerHTML = html;
+  }
+  $("btn-phone").onclick = async () => {
+    $("phone-body").innerHTML = `<div class="empty">Loading...</div>`;
     $("phone-overlay").classList.add("open");
+    await renderPhone();
   };
+  if (new URLSearchParams(location.search).get("phone") === "1") {
+    history.replaceState(null, "", "/");
+    setTimeout(() => $("btn-phone").click(), 1200);
+  }
   $("settings-save").onclick = saveSettings;
   document.querySelectorAll("[data-close]").forEach((b) => { if (!b.dataset.close) b.addEventListener("click", () => b.closest(".overlay").classList.remove("open")); });
   document.querySelectorAll(".overlay").forEach((o) => o.addEventListener("click", (e) => { if (e.target === o) o.classList.remove("open"); }));
