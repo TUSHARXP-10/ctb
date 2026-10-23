@@ -37,6 +37,21 @@ TOOLS: dict[str, tuple[str, dict, str, str]] = {
         _obj({"hours": {"type": "number", "description": "lookback hours (default 12)"},
               "symbol": {"type": "string", "description": "optional coin filter, e.g. SOLUSDT"}}),
         "get_news", "read"),
+    "get_derivatives": (
+        "Market-wide positioning: average funding, the most positive/negative funding coins, open interest "
+        "changes (4h/24h) and long/short accounts for the watchlist, and the last hour of liquidations.",
+        _obj({}), "get_derivatives", "read"),
+    "get_liquidations": (
+        "Liquidation radar: forced liquidations across all Binance USD-M futures in the last N minutes, split "
+        "into longs vs shorts liquidated, by symbol, plus the biggest single prints.",
+        _obj({"minutes": {"type": "number", "description": "lookback, 5-360 (default 60)"}}),
+        "get_liquidations", "read"),
+    "get_correlations": (
+        "Correlation matrix of hourly returns, each coin's beta to BTC, annualized volatility, highly correlated "
+        "pairs, and the open book's real exposure (gross, net, BTC-beta-weighted net).",
+        _obj({"symbols": {"type": "array", "items": {"type": "string"}},
+              "hours": {"type": "integer", "description": "lookback hours (default 168)"}}),
+        "get_correlations", "read"),
     "run_time_machine": (
         "Replay a trade 10,000 times from the coin's own recent 5m candles (same time of day) and re-run the same "
         "stop/target distances on the real history. Returns odds of target first / stop first / neither, average R "
@@ -68,6 +83,19 @@ TOOLS: dict[str, tuple[str, dict, str, str]] = {
               "horizon_hours": {"type": "number", "description": "expected holding time, default 24"}},
              ["symbol", "side", "stop_loss", "take_profit", "thesis"]),
         "open_position", "trade"),
+    "place_pending_entry": (
+        "Enter at a better price instead of chasing: a conditional entry that fires automatically when price reaches "
+        "`entry` (a limit if entry is better than the current price, a breakout stop if it is beyond it). When it "
+        "triggers, the full risk gate and Time Machine run again at the live price, then stop and target are placed. "
+        "One per symbol, expires after expires_hours (default 12).",
+        _obj({"symbol": SYMBOL, "side": SIDE, "entry": {"type": "number"}, "stop_loss": {"type": "number"},
+              "take_profit": {"type": "number"}, "thesis": {"type": "string"},
+              "risk_pct": {"type": "number"}, "leverage": {"type": "integer"}, "confidence": {"type": "number"},
+              "setup": {"type": "string"}, "expires_hours": {"type": "number"}},
+             ["symbol", "side", "entry", "stop_loss", "take_profit", "thesis"]),
+        "place_pending_entry", "trade"),
+    "cancel_pending_entry": ("Cancel a pending entry by id.", _obj({"pending_id": {"type": "integer"}}, ["pending_id"]),
+                             "cancel_pending_entry", "trade"),
     "close_position": (
         "Close all or part of a position at market (fraction 0.05-1.0). The remaining part keeps its stop/target.",
         _obj({"symbol": SYMBOL, "fraction": {"type": "number", "description": "default 1.0 (all)"},

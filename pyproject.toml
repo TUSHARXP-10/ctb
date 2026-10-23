@@ -11,6 +11,7 @@ dependencies = [
   "feedparser>=6.0",
   "python-dotenv>=1.0",
   "numpy>=1.26",
+  "websockets>=12",
   "claude-agent-sdk>=0.1.30",
 ]
 

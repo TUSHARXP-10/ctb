@@ -2,35 +2,65 @@
 
 Tushar.ai is a fully automated crypto **futures** trading desk where **Claude makes every decision**.
 It trades your **Binance Demo Trading** account, runs on your **Claude Pro/Max subscription** (no API
-key, no per-token bill), and shows everything live in a dashboard: Claude's thinking as it happens,
-positions, orders, P&L, charts with its entries and exits, news, the setup scanner, the Time Machine
-replays, its memory of lessons learned, and its market outlook.
+key, no per-token bill), and shows everything live in a dashboard.
 
-![Tushar.ai dashboard](docs/screenshot.png)
+**Tushar Capital, a hedge fund of Claudes.** Every scheduled cycle, a team of five Claude agents works the
+market. Three analysts (charts, news & macro, derivatives & flow) research in parallel. A Risk Officer
+attacks every idea, checks correlation and runs the Time Machine. Then the Head Trader decides and executes.
+You watch all of it live in the War Room.
 
-> The screenshot was taken in offline test mode (simulated prices), with real Claude making the decisions.
+![Tushar.ai War Room](docs/screenshot.png)
+
+> Screenshot from offline test mode (simulated prices) with real Claude agents making the decisions.
+
+### Highlights
+
+- **Multi-agent desk**: Chart Analyst, News & Macro Analyst, Derivatives & Flow Analyst, Risk Officer, Head Trader
+- **Claude trades by itself**: market entries, **pending entries** at a price, partial exits, stop trailing, all
+  through a risk gate it can't override
+- **Time Machine**: 10,000 Monte Carlo replays of every trade plan before money moves
+- **Liquidation radar**: every forced liquidation across Binance futures, live
+- **Correlation & exposure**: heatmap, BTC beta, real BTC-beta-weighted exposure of the book
+- **Self-improving**: Claude reviews every closed trade, keeps a memory of lessons, and tracks stats by setup
+- **Telegram**: trade alerts on your phone plus `/status`, `/pnl`, `/pause`, `/kill`, and chat with Tushar
+- **Voice**: the dashboard speaks trades out loud
+- **Daily report**: Claude writes an end-of-day trading diary
+- **News**: crypto + macro RSS, Fear & Greed, and web search
 
 ---
 
-## What Claude does, every cycle
+## The desk, every cycle
 
 ```
-           every 15 min, or woken by: a price alert, a big move, a stop/target hit
+     every 15 min, or woken by: a price alert, a big move, a stop/target hit, a pending entry
                                         |
-      briefing: account, positions, closed trades, market overview, scanner hits,
-                news + Fear & Greed, its memory, its track record, risk limits
+   briefing: account, positions, closed trades, market overview, scanner hits, liquidations,
+             news + Fear & Greed, its memory, its track record, risk limits
                                         |
-                                     CLAUDE
+        +-------------------------------+-------------------------------+
+        |                               |                               |
+  Chart Analyst               News & Macro Analyst          Derivatives & Flow Analyst
+  structure, setups,          catalysts, event risk,        funding, open interest,
+  Time Machine on ideas       sentiment, web search         liquidations, crowding
+        +-------------------------------+-------------------------------+
+                                        |  structured reports
+                                  Risk Officer
+             argues against every idea, correlation + BTC-beta exposure, vetoes, max risk
+                                        |
+                                  HEAD TRADER (Tushar)
    1. reviews closed trades and writes lessons into its memory
    2. manages open positions: trail stops, take partials, exit broken theses
    3. hunts: scan_market -> analyze_symbol (15m/1h/4h/1d, funding, OI, order book, news)
    4. plan_trade: sizing + every risk limit + Time Machine (10,000 replays)
-   5. open_position (only if the risk gate says PASS) with exchange stop loss + take profit
+   5. open_position, or place_pending_entry at a better price (risk gate must say PASS),
+      always with an exchange stop loss + take profit
    6. set_alert on key levels, publish_outlook, pick when to look again
 ```
 
-Claude works through 17 tools (`tushar/brain/tools.py`). The tools are the only way it can touch the
-account, and every entry goes through a **risk gate that Claude cannot override**.
+Analysts only get read-only tools. Only the Head Trader can trade, through 22 tools
+(`tushar/brain/tools.py`), and every entry goes through a **risk gate that Claude cannot override**.
+Event-driven cycles (an alert, a stop hit) run the Head Trader alone for speed. `DESK_MODE=solo` turns the
+team off entirely.
 
 ### Ideas borrowed from day-trader-skill
 
@@ -54,6 +84,29 @@ own, inside hard limits.
 
 ## Quick start
 
+### Windows + phone in 5 commands
+
+Install [Python 3.12](https://www.python.org/downloads/) (tick "Add python.exe to PATH") and
+[Git](https://git-scm.com/download/win), then in a terminal:
+
+```bat
+git clone https://github.com/TUSHARXP-10/ctb.git tushar-ai
+cd tushar-ai
+run.bat                 :: first run: installs everything and creates .env, then stops
+notepad .env            :: paste BINANCE_API_KEY and BINANCE_API_SECRET (use the Copy buttons on demo.binance.com)
+run.bat login           :: opens Claude Code: log in with your Pro/Max account, then type /exit
+run.bat doctor          :: checks Binance, news and Claude
+run.bat phone           :: starts trading; prints a link + PIN for your phone
+```
+
+On your phone (same Wi-Fi), open the link it prints (like `http://192.168.1.23:8000`) and enter the PIN.
+Or click the **phone icon** in the dashboard on your PC and scan the QR code. Add it to your home screen
+and it opens like an app. If Windows asks about the firewall, allow Python on **private networks**.
+
+The bot only trades while that window is open and the PC is awake. Set Windows sleep to "Never" while it runs.
+
+### Step by step (any OS)
+
 You need Python 3.10+ and a Claude Pro or Max subscription.
 
 ### 1. Get Binance Demo Trading API keys
@@ -69,12 +122,12 @@ You need Python 3.10+ and a Claude Pro or Max subscription.
 Tushar.ai drives **Claude Code** through the Claude Agent SDK, which uses your Pro/Max login.
 
 ```bash
-# install Claude Code (any one of these)
-curl -fsSL https://claude.ai/install.sh | bash        # macOS / Linux
-npm install -g @anthropic-ai/claude-code              # anywhere with Node.js
-
-claude          # opens Claude Code: type /login and sign in with your Pro/Max account, then /exit
+./run.sh login      # Windows: run.bat login
 ```
+
+This opens the copy of Claude Code that ships with Tushar.ai. Log in with your Pro/Max account
+(type `/login` if it doesn't ask), then `/exit`. If you already use Claude Code on this computer, you are
+already logged in.
 
 On a server or in Docker, run `claude setup-token` on your computer and put the token in `.env` as
 `CLAUDE_CODE_OAUTH_TOKEN=...`.
@@ -117,12 +170,15 @@ No Binance keys yet? Set `TRADING_MODE=paper` to trade a simulated $10,000 accou
 
 | Panel | What it shows |
 | --- | --- |
-| Top bar | mode (DEMO/PAPER/LIVE), trading state, "Claude is thinking..." indicator, countdown to the next cycle, subscription usage meter, **Run now / Pause / Kill switch / Settings** |
+| Top bar | mode (DEMO/PAPER/LIVE), trading state, "Claude is thinking..." indicator, countdown to the next cycle, subscription usage meter, **Run now / Pause / Kill switch / Voice / Settings** |
+| War Room | the five agents: live status, stance, confidence, headline, ideas and vetoes; click one for its full report and its own thinking |
 | KPIs | equity, today's P&L, unrealized P&L, available margin, win rate, total P&L, money at risk at the stops |
 | Chart | candles (5m-1D) with EMA20/50, Claude's entries and exits as markers, live entry/stop/target lines |
 | Claude's mind | live stream of Claude's reasoning, every tool call and result, trades, alerts |
 | Outlook | Claude's market regime, bias, summary and watchlist with levels |
-| Positions / Orders / Journal / Cycles / Alerts | the book; the journal has each trade's thesis, Claude's own review and its Time Machine verdict; a cycle opens the full replay, including the exact briefing Claude received |
+| Positions / Orders / Journal / Cycles / Alerts & entries / Daily reports | the book; the journal has each trade's thesis, Claude's own review and its Time Machine verdict; a cycle opens the full replay, including the exact briefing Claude received |
+| Liquidation radar | longs vs shorts liquidated in the last hour, 5-minute bars, top symbols, live feed of big prints |
+| Correlation & exposure | heatmap of hourly-return correlations, beta to BTC, gross / net / BTC-beta-weighted exposure |
 | Market watch, Scanner, News | live prices and funding, current setups, headlines with tags and the Fear & Greed gauge |
 | Time Machine | odds of target vs stop, average R after fees, and a fan chart of 10,000 replays for the latest plan |
 | Equity curve, Memory, Performance by setup | how the account and Claude's lessons evolve |
@@ -157,7 +213,10 @@ Everything lives in `.env` (see `.env.example`). The main settings:
 | --- | --- | --- |
 | `TRADING_MODE` | `demo` | `demo`, `testnet`, `paper`, `live` |
 | `BRAIN` | `agent` | `agent` (Claude with live tools), `cli` (`claude -p`, single pass), `mock` (rules, for testing) |
-| `CLAUDE_MODEL` | `sonnet` | `sonnet`, `opus`, `haiku` or a full model id |
+| `CLAUDE_MODEL` | `sonnet` | the Head Trader's model: `sonnet`, `opus`, `haiku` or a full model id |
+| `DESK_MODE` | `team` | `team` (5 agents) or `solo` (Head Trader only) |
+| `ANALYST_MODEL` | `haiku` | the analysts' and Risk Officer's model |
+| `TEAM_ON_EVENTS` | `false` | also run the full team on alert / stop-hit cycles |
 | `CLAUDE_ALLOW_WEB` | `true` | Claude may use web search for news |
 | `CYCLE_MINUTES` | `15` | regular cycle; Claude can ask for sooner or later each time |
 | `WATCHLIST` | BTC, ETH, SOL, BNB, XRP, DOGE | always in the briefing |
@@ -169,13 +228,33 @@ Everything lives in `.env` (see `.env.example`). The main settings:
 | `MIN_REWARD_RISK` | `1.5` | |
 | `TM_GATE` / `TM_MIN_AVG_R` | `true` / `-0.15` | Time Machine veto threshold (average R after fees) |
 | `DASHBOARD_PASSWORD` | empty | required if the dashboard is reachable from other devices |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty | phone alerts and commands (see below) |
+| `LIQUIDATION_RADAR` | `true` | listen to Binance's public liquidation stream |
+| `DAILY_REPORT` / `DAILY_REPORT_HOUR_UTC` | `true` / `0` | Claude's end-of-day diary |
 
 ### Claude usage
 
-Each cycle is one Claude Code session (typically 5-20 tool calls). At 15-minute cycles that is about 96
-sessions a day. **Max** plans handle this comfortably with `sonnet`; on **Pro**, use `CYCLE_MINUTES=30`
-or more, or `CLAUDE_MODEL=haiku`. When you hit the usage window, Tushar.ai waits for the reset and shows
-it in the top bar. Open positions stay protected by their exchange stops in the meantime.
+A team cycle is 5 Claude Code sessions (3 analysts in parallel, the Risk Officer, the Head Trader) and
+takes 3-5 minutes. A solo cycle is one session. Suggested setups:
+
+| Plan | Suggested settings |
+| --- | --- |
+| Max 20x | `DESK_MODE=team`, `CLAUDE_MODEL=opus` or `sonnet`, `ANALYST_MODEL=sonnet`, `CYCLE_MINUTES=15` |
+| Max 5x | `DESK_MODE=team`, `CLAUDE_MODEL=sonnet`, `ANALYST_MODEL=haiku`, `CYCLE_MINUTES=30` |
+| Pro | `DESK_MODE=solo`, `CLAUDE_MODEL=sonnet`, `CYCLE_MINUTES=30`-`60` (or team with `CYCLE_MINUTES=120`) |
+
+When you hit the usage window, Tushar.ai waits for the reset and shows it in the top bar. Open positions
+stay protected by their exchange stops in the meantime.
+
+## Telegram: control it from your phone
+
+1. In Telegram, message **@BotFather**, send `/newbot`, and copy the token into `.env` as `TELEGRAM_BOT_TOKEN`.
+2. Restart Tushar.ai and send `/start` to your new bot. It replies with your chat id.
+3. Put it in `.env` as `TELEGRAM_CHAT_ID` and restart. Only that chat can give commands.
+
+You get every trade, stop/target hit, alert and daily report. Commands: `/status`, `/positions`, `/pnl`,
+`/outlook`, `/team`, `/run`, `/pause`, `/resume`, `/kill` (asks for `/kill confirm`), `/report`. Any other
+message is a question for Tushar.
 
 ---
 
@@ -201,10 +280,14 @@ docker compose logs -f
 ## Commands
 
 ```bash
-./run.sh            # bot + dashboard
+./run.sh            # bot + dashboard (this computer only)
+./run.sh phone      # same, reachable from your phone on the same Wi-Fi, with a PIN
+./run.sh login      # log in to Claude with your Pro/Max account
 ./run.sh doctor     # check Binance, news and the Claude login
 ./run.sh cycle      # run one Claude cycle in the terminal and print its thinking
 ```
+
+Windows: `run.bat` with the same words (`run.bat phone`, `run.bat doctor`, ...).
 
 Offline test mode (no network, synthetic prices, rule-based brain):
 
@@ -212,7 +295,7 @@ Offline test mode (no network, synthetic prices, rule-based brain):
 MARKET_SOURCE=sim TRADING_MODE=paper BRAIN=mock python -m tushar
 ```
 
-Tests (offline, about 15 seconds):
+Tests (offline, about 20 seconds):
 
 ```bash
 pip install -r requirements-dev.txt
@@ -223,19 +306,23 @@ python -m pytest -q
 
 ```
 tushar/
-  engine.py         loops: prices, position monitor, news, scanner, Claude scheduler
-  desk.py           every action Claude can take (open/close/stops/alerts/memory/outlook)
+  engine.py         loops: prices, position monitor, pending entries, news, scanner, radar, scheduler, daily report
+  desk.py           every action Claude can take (open/close/stops/pending entries/alerts/memory/outlook)
   risk.py           position sizing + PASS/BLOCK risk gate
   timemachine.py    Monte Carlo + history replay of a trade plan
   scanner.py        setup scanner
   market.py         cached market data and multi-timeframe snapshots
   news.py           RSS + Fear & Greed
+  radar.py          live liquidation radar
+  analytics.py      correlations, BTC beta, exposure
+  telegram.py       phone alerts and commands
   indicators.py     EMA, RSI, ATR, MACD, Bollinger, ADX, pivots
-  brain/            agent.py (Claude Agent SDK), cli.py (claude -p), mock.py, prompts.py, tools.py
+  brain/            team.py (the multi-agent desk), agent.py (Claude Agent SDK sessions), cli.py (claude -p),
+                    mock.py, prompts.py (charter, roles, briefing), tools.py
   exchange/         binance.py (demo/testnet/live), paper.py (simulated account), sim.py (synthetic market)
   server.py         FastAPI + WebSocket
   web/              the dashboard (no build step)
-tests/              57 offline tests
+tests/              72 offline tests
 ```
 
 ## Troubleshooting
@@ -248,6 +335,8 @@ tests/              57 offline tests
 | HTTP 451 from Binance | Binance is not available from your location or server region |
 | Stop/target errors | `doctor` shows whether the Algo Order API is available; Tushar.ai falls back automatically and enforces stops itself |
 | News panel empty | your network blocks the RSS feeds; Claude can still use web search |
+| Phone can't open the link | same Wi-Fi? Windows firewall: allow Python on private networks; some routers block devices from seeing each other ("AP isolation"): use Tailscale instead |
+| Claude Code on Windows asks for Git Bash | install [Git for Windows](https://git-scm.com/download/win) and run `run.bat login` again |
 
 ---
 

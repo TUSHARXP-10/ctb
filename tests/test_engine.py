@@ -133,3 +133,38 @@ def test_extract_json_variants():
     assert extract_json('Here you go:\n```json\n{"a": {"b": 2}}\n```') == {"a": {"b": 2}}
     assert extract_json('blah {"x": [1, {"y": 2}]} trailing') == {"x": [1, {"y": 2}]}
     assert extract_json("no json") is None
+
+
+async def test_pending_entry_fires_through_risk_gate(engine):
+    engine.s.tm_gate = False
+    d = engine.desk
+    price = engine.market.price("ETHUSDT")
+    bad = await d.place_pending_entry("ETHUSDT", "long", price * 0.99, price * 1.0, price * 1.05, "t")
+    assert bad["status"] == "ERROR"                                     # stop above entry
+    far = await d.place_pending_entry("ETHUSDT", "long", price * 0.5, price * 0.45, price * 0.6, "t")
+    assert far["status"] == "ERROR"                                     # too far from price
+    res = await d.place_pending_entry("ETHUSDT", "long", price * 0.99, price * 0.975, price * 1.04, "dip buy",
+                                      setup="pullback")
+    assert res["status"] == "PENDING" and "below" in res["triggers_when_price"] and res["type"] == "limit"
+    assert (await d.place_pending_entry("ETHUSDT", "long", price * 0.98, price * 0.97, price * 1.04, "x"))["status"] == "ERROR"
+    await engine.market.refresh_prices()
+    await engine.monitor_once()
+    assert d.pending_entries() and not engine.db.open_trades()          # not there yet
+    engine.source.live["ETHUSDT"]["c"] = price * 0.985
+    await engine.market.refresh_prices()
+    await engine.monitor_once()
+    assert not d.pending_entries()
+    t = engine.db.open_trades()[0]
+    assert t["symbol"] == "ETHUSDT" and t["side"] == "long" and "pending entry" in t["thesis"]
+    assert any("pending entry" in r for r in engine._wake_reasons)
+    row = engine.db.one("SELECT status FROM pending_entries WHERE id=?", (res["pending_id"],))
+    assert row["status"] == "filled"
+
+
+async def test_pending_entry_expires(engine):
+    d = engine.desk
+    price = engine.market.price("BNBUSDT")
+    res = await d.place_pending_entry("BNBUSDT", "short", price * 1.01, price * 1.03, price * 0.97, "fade", expires_hours=1)
+    engine.db.update("pending_entries", res["pending_id"], {"expires_at": time.time() - 1})
+    await engine.monitor_once()
+    assert engine.db.one("SELECT status FROM pending_entries WHERE id=?", (res["pending_id"],))["status"] == "expired"

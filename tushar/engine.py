@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -25,12 +26,13 @@ from .events import EventBus
 from .exchange.base import ExchangeError
 from .market import MarketService
 from .news import NewsDesk
+from .radar import LiquidationRadar
 from .risk import RiskManager
 from .scanner import Scanner
 
 log = logging.getLogger("tushar.engine")
 
-CYCLE_TIMEOUT = 900  # seconds
+CYCLE_TIMEOUT = 1500  # seconds (a full team cycle runs 5 Claude sessions)
 
 
 class Engine:
@@ -65,7 +67,15 @@ class Engine:
         self.news = NewsDesk(self.db, self.bus)
         self.risk = RiskManager(settings)
         self.desk = Desk(settings, self.db, self.bus, self.market, self.broker, self.scanner, self.news, self.risk)
+        self.radar = LiquidationRadar(self.bus)
+        self.desk.radar = self.radar
         self.brain = make_brain(settings.brain, self)
+        self.team: dict = {"mode": settings.desk_mode, "cycle_id": None, "agents": {}}
+        self._restore_team()
+        self.telegram = None
+        if settings.telegram_bot_token:
+            from .telegram import TelegramBot
+            self.telegram = TelegramBot(self, settings.telegram_bot_token, settings.telegram_chat_id)
 
         self.started_at = time.time()
         self.cycle_lock = asyncio.Lock()
@@ -102,11 +112,21 @@ class Engine:
             self.log_error(f"account check failed: {e}")
             raise
         self.ready = True
+        self._replay_mind()
         self.bus.publish("status", self.status())
         log.info("Tushar.ai ready: %s, brain=%s, model=%s", self.s.mode_label, self.brain.name, self.s.claude_model)
         if loops:
-            for coro in (self._price_loop(), self._monitor_loop(), self._news_loop(), self._scanner_loop(),
-                         self._scheduler_loop()):
+            coros = [self._price_loop(), self._monitor_loop(), self._news_loop(), self._scanner_loop(),
+                     self._scheduler_loop(), self._daily_loop()]
+            if self.s.market_source == "sim":
+                coros.append(self.radar.run_sim(self.market))
+            elif self.s.liquidation_radar:
+                coros.append(self.radar.run())
+            else:
+                self.radar.status = "off"
+            if self.telegram:
+                coros.append(self.telegram.run())
+            for coro in coros:
                 self._tasks.append(asyncio.create_task(coro))
 
     async def stop(self) -> None:
@@ -117,6 +137,24 @@ class Engine:
             self._cycle_task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         await self.source.close()
+
+    def _replay_mind(self) -> None:
+        """Put the last cycles' thinking back in the live feed after a restart."""
+        if self.bus.mind:
+            return
+        cycles = self.db.query("SELECT id, started_at, trigger, status, finished_at, summary FROM cycles "
+                               "ORDER BY id DESC LIMIT 2")[::-1]
+        for c in cycles:
+            self.bus.mind.append({"type": "cycle_start", "ts": c["started_at"],
+                                  "data": {"cycle_id": c["id"], "trigger": c["trigger"]}})
+            for e in self.db.query("SELECT kind, data, ts FROM events WHERE cycle_id=? AND kind IN "
+                                   "('thought','thinking','tool_call','tool_result') ORDER BY id DESC LIMIT 300",
+                                   (c["id"],))[::-1]:
+                self.bus.mind.append({"type": e["kind"], "ts": e["ts"], "data": e["data"]})
+            if c["finished_at"]:
+                self.bus.mind.append({"type": "cycle_end", "ts": c["finished_at"], "data": {
+                    "cycle_id": c["id"], "status": c["status"],
+                    "duration_s": round(c["finished_at"] - c["started_at"], 1)}})
 
     def log_error(self, text: str) -> None:
         log.error(text)
@@ -252,6 +290,7 @@ class Engine:
                 self.desk.invalidate()
         await self.reconcile(events)
         await self._check_alerts()
+        await self._check_pending()
         now = time.time()
         if now - self._last_equity_at >= 60:
             self._last_equity_at = now
@@ -397,6 +436,38 @@ class Engine:
                 self.bus.publish("alerts", self.desk.active_alerts())
                 self.wake(text)
 
+    async def _check_pending(self) -> None:
+        for p in self.desk.pending_entries():
+            now = time.time()
+            if now >= p["expires_at"]:
+                self.db.update("pending_entries", p["id"], {"status": "expired"})
+                self.bus.publish("pending", self.desk.pending_entries())
+                continue
+            price = self.market.price(p["symbol"])
+            if price is None:
+                continue
+            hit = price >= p["entry"] if p["condition"] == "above" else price <= p["entry"]
+            if not hit:
+                continue
+            self.db.update("pending_entries", p["id"], {"status": "triggering", "triggered_at": now})
+            self.desk.actor = "pending"
+            try:
+                res = await self.desk.open_position(
+                    p["symbol"], p["side"], p["stop_loss"], p["take_profit"], p["risk_pct"], p["leverage"],
+                    p["confidence"], p["setup"], f"{p['thesis']} [pending entry #{p['id']} at {p['entry']:g}]")
+            except Exception as e:  # noqa: BLE001
+                res = {"status": "ERROR", "error": str(e)}
+            finally:
+                self.desk.actor = "claude"
+            status = {"FILLED": "filled", "BLOCKED": "blocked"}.get(res.get("status"), "error")
+            self.db.update("pending_entries", p["id"], {"status": status, "result": res})
+            text = (f"pending entry #{p['id']} {p['symbol']} {p['side']} at {p['entry']:g}: {status}"
+                    + (f" ({'; '.join(res.get('blocks', []))})" if status == "blocked" else "")
+                    + (f" ({res.get('error')})" if status == "error" else ""))
+            self.bus.publish("notice", {"level": "info" if status == "filled" else "warn", "text": text})
+            self.bus.publish("pending", self.desk.pending_entries())
+            self.wake(text)
+
     async def _check_daily_loss(self, acct) -> None:
         if self.desk.halted_reason():
             return
@@ -433,7 +504,8 @@ class Engine:
                 closed = self.db.unreviewed_closed()[-6:]
                 briefing = await self.build_briefing(trigger, closed)
                 self.db.add_event(cid, "briefing", {"text": briefing})
-                result = await asyncio.wait_for(self.brain.run_cycle(briefing, cid), timeout=CYCLE_TIMEOUT)
+                result = await asyncio.wait_for(self.brain.run_cycle(briefing, cid, trigger=trigger),
+                                                timeout=CYCLE_TIMEOUT)
                 for t in closed:
                     if not self.db.one("SELECT reviewed FROM trades WHERE id=?", (t["id"],))["reviewed"]:
                         self.db.update("trades", t["id"], {"reviewed": 1})
@@ -460,7 +532,7 @@ class Engine:
                 self.db.set("last_cycle_finished", finished)
                 self.db.update("cycles", cid, {
                     "finished_at": finished, "status": status, "num_turns": result.get("num_turns"),
-                    "duration_ms": result.get("duration_ms") or int((finished - started) * 1000),
+                    "duration_ms": int((finished - started) * 1000),
                     "cost_usd": result.get("cost_usd"), "input_tokens": result.get("input_tokens"),
                     "output_tokens": result.get("output_tokens"), "summary": (result.get("summary") or "")[:3000],
                     "error": error, "actions": self.desk.actions,
@@ -492,9 +564,10 @@ class Engine:
             scan = {"hits": [], "scanned": 0, "error": str(e)}
         news = await desk.get_news(hours=12, limit=20)
         stats = trade_stats(self.db.recent_trades(300, status="closed"))
+        liq = self.radar.summary(60, 5) if self.radar.events else None
         return build_briefing(trigger=trigger, settings=self.s, portfolio=portfolio, overview=overview, scan=scan,
                               news=news, closed=closed, memories=self.db.memories(15), stats=stats,
-                              outlook=desk.outlook, alerts=desk.active_alerts(), usage=self.usage)
+                              outlook=desk.outlook, alerts=desk.active_alerts(), usage=self.usage, liquidations=liq)
 
     def note_usage(self, info: dict) -> None:
         self.usage = {**info, "updated": time.time()}
@@ -507,6 +580,80 @@ class Engine:
         self.claude_session = {**info, "seen": time.time()}
         self.db.set("claude_session", self.claude_session)
         self.bus.publish("status", self.status())
+
+    # ================================================================ team
+    def _restore_team(self) -> None:
+        row = self.db.one("SELECT cycle_id FROM reports ORDER BY id DESC LIMIT 1")
+        if not row:
+            return
+        self.team["cycle_id"] = row["cycle_id"]
+        for r in self.db.query("SELECT agent, data, ts FROM reports WHERE cycle_id=?", (row["cycle_id"],)):
+            self.team["agents"][r["agent"]] = {"status": "done", "ts": r["ts"], "report": r["data"]}
+
+    def team_mode_note(self, cycle_id: int, mode: str) -> None:
+        self.team = {"mode": mode, "cycle_id": cycle_id,
+                     "agents": {} if mode.startswith("team") else {"pm": self.team.get("agents", {}).get("pm", {})}}
+        self.bus.publish("team", self.team_view())
+
+    def agent_status(self, cycle_id: int, agent: str, status: str) -> None:
+        a = self.team["agents"].setdefault(agent, {})
+        a.update({"status": status, "ts": time.time()})
+        self.bus.publish("agent_status", {"cycle_id": cycle_id, "agent": agent, "status": status})
+
+    def agent_report(self, cycle_id: int, agent: str, report: dict) -> None:
+        self.db.insert("reports", {"ts": time.time(), "cycle_id": cycle_id, "agent": agent, "data": report})
+        a = self.team["agents"].setdefault(agent, {})
+        a.update({"status": "error" if report.get("error") else "done", "ts": time.time(), "report": report})
+        self.bus.publish("agent_report", {"cycle_id": cycle_id, "agent": agent, "report": report})
+
+    def team_view(self) -> dict:
+        from .brain.prompts import PM_META, TEAM
+        meta = {k: {kk: v[kk] for kk in ("name", "emoji", "color")} for k, v in TEAM.items()}
+        meta["pm"] = PM_META
+        return {**self.team, "meta": meta, "order": ["chartist", "macro", "flow", "risk", "pm"],
+                "desk_mode": self.s.desk_mode, "analyst_model": self.s.analyst_model, "pm_model": self.s.claude_model}
+
+    # ================================================================ daily report
+    async def _daily_loop(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        while True:
+            now = datetime.now(timezone.utc)
+            nxt = now.replace(hour=self.s.daily_report_hour_utc, minute=5, second=0, microsecond=0)
+            if nxt <= now:
+                nxt += timedelta(days=1)
+            await asyncio.sleep(max(30.0, (nxt - now).total_seconds()))
+            if self.s.daily_report:
+                try:
+                    await self.make_daily_report()
+                except Exception as e:  # noqa: BLE001
+                    self.log_error(f"daily report: {e}")
+
+    async def make_daily_report(self) -> dict:
+        from datetime import datetime, timezone
+        since = time.time() - 86400
+        trades = [t for t in self.db.recent_trades(300) if (t["closed_at"] or t["opened_at"]) >= since]
+        stats = trade_stats([t for t in trades if t["status"] == "closed"])
+        acct = await self.desk.account(max_age=0)
+        eq = self.db.one("SELECT equity FROM equity WHERE ts>=? ORDER BY ts LIMIT 1", (since,))
+        start_eq = eq["equity"] if eq else acct.equity
+        facts = {
+            "equity_now": round(acct.equity, 2), "equity_24h_ago": round(start_eq, 2),
+            "change_24h": round(acct.equity - start_eq, 2),
+            "change_24h_pct": round((acct.equity / start_eq - 1) * 100, 2) if start_eq else None,
+            "stats_24h": stats, "open_positions": len(acct.positions),
+            "trades_24h": [{"symbol": t["symbol"], "side": t["side"], "pnl": t["pnl"], "r": t["r_multiple"],
+                            "exit_reason": t["exit_reason"], "setup": t["setup"], "review": t["review"]}
+                           for t in trades],
+            "outlook": self.desk.outlook,
+        }
+        context = ("Facts for the last 24 hours (UTC):\n" + json.dumps(facts, default=str) +
+                   "\n\nWrite the daily trading diary now.")
+        text = await asyncio.wait_for(self.brain.daily_report(context), timeout=600)
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        rid = self.db.insert("daily_reports", {"ts": time.time(), "day": day, "text": text, "stats": facts})
+        rep = {"id": rid, "day": day, "text": text, "stats": facts, "ts": time.time()}
+        self.bus.publish("daily_report", rep)
+        return rep
 
     # ================================================================ controls
     async def run_now(self) -> dict:
@@ -601,6 +748,8 @@ class Engine:
             "claude": self.claude_session, "usage": self.usage, "usage_blocked_until": self.usage_blocked_until,
             "uptime_s": round(time.time() - self.started_at), "ready": self.ready,
             "news_ok": self.news.healthy, "consecutive_failures": self.consecutive_failures,
+            "desk_mode": self.s.desk_mode, "radar": self.radar.status,
+            "telegram": (self.telegram.status if self.telegram else "off"),
         }
 
     async def full_state(self) -> dict:
@@ -635,10 +784,15 @@ class Engine:
             "news_status": self.news.status,
             "fng": self.news.fng,
             "alerts": self.desk.active_alerts(),
+            "pending": self.desk.pending_entries(),
             "memories": db.memories(40),
             "scanner": self.scanner.last,
             "equity": equity,
             "sim": db.one("SELECT * FROM sims ORDER BY id DESC LIMIT 1"),
             "chat": db.query("SELECT role, text, ts FROM chat ORDER BY id DESC LIMIT 30")[::-1],
+            "team": self.team_view(),
+            "liquidations": {"summary": self.radar.summary(60, 8), "recent": self.radar.recent(30),
+                             "buckets": self.radar.buckets(120, 5)},
+            "daily_reports": db.query("SELECT id, ts, day, text FROM daily_reports ORDER BY id DESC LIMIT 14"),
             "errors": list(self.errors)[-10:],
         }

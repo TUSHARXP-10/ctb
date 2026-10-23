@@ -2,7 +2,8 @@
 
 Runs on your Claude subscription (Pro/Max login or CLAUDE_CODE_OAUTH_TOKEN),
 not an API key. Claude calls the desk's tools in-process through an SDK MCP
-server; every text block, tool call and result is streamed to the dashboard.
+server; every text block, tool call and result is streamed to the dashboard,
+tagged with which agent produced it.
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .prompts import CHAT_PROMPT, SYSTEM_PROMPT
+from .prompts import CHAT_PROMPT, DAILY_PROMPT, SYSTEM_PROMPT
 from .tools import TOOLS, call_tool, tool_names
 
 log = logging.getLogger("tushar.brain.agent")
@@ -35,13 +36,12 @@ class AgentBrain:
         self.workspace.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------ plumbing
-    def _server(self, include_trading: bool):
+    def _server(self, names: list[str], extra: list | None = None, agent: str = "pm"):
         from claude_agent_sdk import create_sdk_mcp_server, tool
 
-        desk = self.engine.desk
-        bus = self.engine.bus
-        tools = []
-        for name in tool_names(include_trading):
+        desk, bus = self.engine.desk, self.engine.bus
+        tools = list(extra or [])
+        for name in names:
             desc, schema, _, _ = TOOLS[name]
 
             def make(n: str):
@@ -51,27 +51,30 @@ class AgentBrain:
                         return {"content": [{"type": "text", "text": json.dumps(result, default=str)}]}
                     except Exception as e:  # noqa: BLE001
                         log.exception("tool %s failed", n)
-                        bus.publish("error", {"cycle_id": desk.cycle_id, "text": f"tool {n} failed: {e}"})
+                        bus.publish("error", {"cycle_id": desk.cycle_id, "agent": agent, "text": f"tool {n} failed: {e}"})
                         return {"content": [{"type": "text", "text": f"ERROR: {e}"}], "is_error": True}
                 return handler
 
             tools.append(tool(name, desc, schema)(make(name)))
         return create_sdk_mcp_server("tushar", "1.0.0", tools)
 
-    def _options(self, system_prompt: str, include_trading: bool, max_turns: int):
+    def _options(self, system_prompt: str, names: list[str], max_turns: int, model: str | None = None,
+                 web: bool | None = None, extra: list | None = None, extra_names: list[str] | None = None,
+                 agent: str = "pm"):
         from claude_agent_sdk import ClaudeAgentOptions
 
         s = self.engine.s
-        web = WEB_TOOLS if s.claude_allow_web else []
-        allowed = [f"mcp__tushar__{n}" for n in tool_names(include_trading)] + web
+        use_web = s.claude_allow_web if web is None else (web and s.claude_allow_web)
+        webt = WEB_TOOLS if use_web else []
+        allowed = [f"mcp__tushar__{n}" for n in names + (extra_names or [])] + webt
         kwargs: dict[str, Any] = dict(
             system_prompt=system_prompt,
-            mcp_servers={"tushar": self._server(include_trading)},
-            tools=list(web),            # built-in tools: only web search/fetch (or none)
+            mcp_servers={"tushar": self._server(names, extra, agent)},
+            tools=list(webt),           # built-in tools: only web search/fetch (or none)
             allowed_tools=allowed,
             permission_mode="dontAsk",  # anything not pre-approved is denied, never prompted
             max_turns=max_turns,
-            model=s.claude_model or None,
+            model=(model or s.claude_model) or None,
             cwd=str(self.workspace),
             setting_sources=[],         # ignore your personal Claude Code settings / CLAUDE.md
             stderr=lambda line: log.debug("claude: %s", line),
@@ -82,29 +85,39 @@ class AgentBrain:
             kwargs["effort"] = s.claude_effort
         return ClaudeAgentOptions(**kwargs)
 
-    # ------------------------------------------------------------ cycle
-    async def run_cycle(self, briefing: str, cycle_id: int) -> dict:
+    async def session(self, prompt: str, system: str, names: list[str], *, cycle_id: int | None, agent: str = "pm",
+                      max_turns: int = 40, model: str | None = None, web: bool | None = None,
+                      extra: list | None = None, extra_names: list[str] | None = None,
+                      channel: str = "mind") -> dict:
+        """Run one Claude Code session and stream it to the dashboard."""
         from claude_agent_sdk import ClaudeSDKClient
 
-        opts = self._options(SYSTEM_PROMPT, True, self.engine.s.claude_max_turns)
-        result: dict[str, Any] = {"texts": []}
+        opts = self._options(system, names, max_turns, model, web, extra, extra_names, agent)
+        result: dict[str, Any] = {"texts": [], "agent": agent}
         async with ClaudeSDKClient(options=opts) as client:
-            await client.query(briefing)
+            await client.query(prompt)
             async for msg in client.receive_response():
-                self._handle(msg, cycle_id, result)
+                self._handle(msg, cycle_id, result, channel=channel, agent=agent)
         result["summary"] = (result.get("result") or "\n".join(result["texts"][-2:]) or "").strip()
         return result
 
-    def _handle(self, msg, cycle_id: int | None, result: dict, channel: str = "mind") -> None:
+    # ------------------------------------------------------------ cycle
+    async def run_cycle(self, briefing: str, cycle_id: int, trigger: str = "", system: str | None = None) -> dict:
+        return await self.session(briefing, system or SYSTEM_PROMPT, tool_names(True), cycle_id=cycle_id,
+                                  agent="pm", max_turns=self.engine.s.claude_max_turns)
+
+    def _handle(self, msg, cycle_id: int | None, result: dict, channel: str = "mind", agent: str = "pm") -> None:
         from claude_agent_sdk import (AssistantMessage, RateLimitEvent, ResultMessage, SystemMessage, TextBlock,
                                       ThinkingBlock, ToolResultBlock, ToolUseBlock, UserMessage)
 
         bus, db = self.engine.bus, self.engine.db
 
         def emit(kind: str, data: dict) -> None:
-            data = {"cycle_id": cycle_id, **data}
+            data = {"cycle_id": cycle_id, "agent": agent, **data}
             if channel == "chat":
                 bus.publish("chat_event", {"kind": kind, **data})
+            elif channel == "quiet":
+                return
             else:
                 bus.publish(kind, data)
                 db.add_event(cycle_id, kind, data)
@@ -114,7 +127,8 @@ class AgentBrain:
                 info = {"model": msg.data.get("model"), "auth": msg.data.get("apiKeySource"),
                         "claude_code_version": msg.data.get("claude_code_version")}
                 result["init"] = info
-                self.engine.note_claude_session(info)
+                if agent == "pm":
+                    self.engine.note_claude_session(info)
         elif isinstance(msg, AssistantMessage):
             if getattr(msg, "error", None):
                 result["assistant_error"] = str(msg.error)
@@ -152,22 +166,22 @@ class AgentBrain:
             self.engine.note_usage({"status": info.status, "utilization": info.utilization,
                                     "resets_at": info.resets_at, "type": info.rate_limit_type})
 
-    # ------------------------------------------------------------ chat
+    # ------------------------------------------------------------ chat & reports
     async def chat(self, message: str, history: list[dict]) -> str:
-        from claude_agent_sdk import ClaudeSDKClient
-
         can_trade = self.engine.s.chat_can_trade
         note = ("You may trade if the owner explicitly asks; the same risk gate applies." if can_trade
                 else "You cannot place or change trades from chat; say so if asked and explain what you would do.")
-        opts = self._options(CHAT_PROMPT.format(trade_note=note), can_trade, 15)
         convo = "\n".join(f"{m['role'].upper()}: {m['text']}" for m in history[-10:])
         prompt = (f"Earlier in this chat:\n{convo}\n\n" if convo else "") + f"OWNER: {message}"
-        result: dict[str, Any] = {"texts": []}
         started = time.time()
-        async with ClaudeSDKClient(options=opts) as client:
-            await client.query(prompt)
-            async for msg in client.receive_response():
-                self._handle(msg, None, result, channel="chat")
-        answer = (result.get("result") or "\n".join(result["texts"]) or "").strip()
+        res = await self.session(prompt, CHAT_PROMPT.format(trade_note=note), tool_names(can_trade), cycle_id=None,
+                                 agent="pm", max_turns=15, channel="chat")
         log.info("chat answered in %.1fs", time.time() - started)
-        return answer or "(no answer)"
+        return (res.get("result") or "\n".join(res["texts"]) or "(no answer)").strip()
+
+    async def daily_report(self, context: str) -> str:
+        names = ["get_portfolio", "get_trade_journal", "get_market_overview", "get_news"]
+        res = await self.session(context, DAILY_PROMPT, names, cycle_id=None, agent="pm", max_turns=8,
+                                 channel="quiet", web=False)
+        return (res.get("result") or "\n".join(res["texts"]) or "").strip()
+

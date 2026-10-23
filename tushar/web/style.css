@@ -268,8 +268,46 @@ tr.detail td { white-space: normal; background: var(--bg2); color: var(--muted);
 .banner.err { background: var(--red-bg); border-color: rgba(240, 71, 91, .4); color: #ffb3bc; }
 .ev-log { font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: pre-wrap; word-break: break-word; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px; max-height: 300px; overflow: auto; }
 
+/* ---------- war room ---------- */
+.warroom { margin-bottom: 14px; background: linear-gradient(180deg, rgba(139, 108, 255, .06), var(--panel) 60%); }
+.team-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.agent { position: relative; background: var(--bg2); border: 1px solid var(--line); border-radius: 14px; padding: 12px; cursor: pointer; min-width: 0; display: flex; flex-direction: column; gap: 7px; transition: border-color .2s, transform .1s; }
+.agent:hover { border-color: var(--line2); transform: translateY(-1px); }
+.agent .phase { font-size: 10px; letter-spacing: .8px; text-transform: uppercase; color: var(--dim); }
+.agent .top { display: flex; align-items: center; gap: 9px; }
+.agent .av { width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; font-size: 18px; flex: 0 0 34px; }
+.agent .nm { font-weight: 700; font-size: 13px; line-height: 1.2; }
+.agent .st { font-size: 11px; color: var(--muted); }
+.agent .hl { font-weight: 600; font-size: 12.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 34px; }
+.agent .sm { font-size: 12px; color: var(--muted); line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.agent .ideas { display: flex; gap: 4px; flex-wrap: wrap; }
+.agent .foot { font-size: 10.5px; color: var(--dim); font-family: var(--mono); margin-top: auto; }
+.agent.working { border-color: rgba(139, 108, 255, .6); box-shadow: 0 0 0 1px rgba(139, 108, 255, .25), 0 0 26px rgba(139, 108, 255, .18); }
+.agent.working .av { animation: orb 1.2s ease-in-out infinite; }
+.agent.waiting { opacity: .65; }
+.agent.off { opacity: .4; }
+.agent.error { border-color: rgba(240, 71, 91, .5); }
+.conf { height: 4px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.conf i { display: block; height: 100%; }
+.agent:not(:last-child)::after { content: "\203A"; position: absolute; right: -11px; top: 50%; transform: translateY(-50%); color: var(--dim); font-size: 18px; z-index: 2; }
+.m-who { font-size: 10.5px; font-weight: 700; letter-spacing: .3px; margin-bottom: 2px; }
+
+/* ---------- liquidations / correlations ---------- */
+.liq-bar { display: flex; height: 10px; border-radius: 6px; overflow: hidden; background: var(--line); margin: 8px 0; }
+.liq-row { display: flex; align-items: center; gap: 10px; padding: 7px 14px; border-bottom: 1px solid rgba(28, 36, 54, .6); font-size: 12.5px; }
+.liq-row.new { animation: fu 1.2s; }
+.liq-row.new.long { animation: fd 1.2s; }
+.heat { border-collapse: separate; border-spacing: 2px; font-size: 10.5px; }
+.heat td, .heat th { padding: 0; text-align: center; border: none; position: static; background: none; }
+.heat td div { width: 34px; height: 26px; border-radius: 5px; display: grid; place-items: center; font-family: var(--mono); color: #fff; font-size: 10px; }
+.heat th { font-weight: 600; color: var(--muted); padding: 2px 4px; font-size: 10px; text-transform: none; letter-spacing: 0; }
+.report-card { padding: 12px 14px; border-bottom: 1px solid var(--line); white-space: pre-wrap; line-height: 1.55; font-size: 13px; color: #cfd5e2; }
+
 /* ---------- responsive ---------- */
 @media (max-width: 1400px) { .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 1250px) {
+  .team-grid { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(230px, 1fr); overflow-x: auto; padding-bottom: 6px; }
+}
 @media (max-width: 1100px) {
   .span-3, .span-4, .span-5, .span-6, .span-7, .span-8 { grid-column: span 12; }
   .mind { height: 520px; }

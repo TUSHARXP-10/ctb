@@ -53,7 +53,24 @@
   const S = {
     st: null, symbol: "BTCUSDT", interval: "15m", tab: "positions", tickers: {}, account: null, openTrades: [],
     trades: [], candles: [], toolEls: {}, priceLines: [], lastSim: null, settings: null, mindItems: 0,
+    team: null, liq: null, reports: [], outlook: null, corr: null,
   };
+  let voice = false;
+  try { voice = localStorage.getItem("tushar.voice") === "1"; } catch (e) { /* storage blocked */ }
+  function speak(text) {
+    if (!voice || !window.speechSynthesis || !text) return;
+    const u = new SpeechSynthesisUtterance(String(text).slice(0, 220));
+    u.rate = 1.05;
+    window.speechSynthesis.speak(u);
+  }
+  function agentMeta(agent) {
+    if (!agent || agent === "pm" || !S.team || !S.team.meta || !S.team.meta[agent]) return { emoji: "T", color: null, name: "Head Trader" };
+    return S.team.meta[agent];
+  }
+  function avatar(agent) {
+    const m = agentMeta(agent);
+    return m.color ? `<div class="av" style="background:${m.color}22;border:1px solid ${m.color}66;font-size:13px">${m.emoji}</div>` : `<div class="av">T</div>`;
+  }
   try { S.symbol = localStorage.getItem("tushar.symbol") || S.symbol; S.interval = localStorage.getItem("tushar.iv") || S.interval; } catch (e) { /* storage blocked */ }
 
   // ------------------------------------------------------------------ charts
@@ -232,12 +249,130 @@
     $("c-positions").textContent = positions.length;
     $("c-orders").textContent = (S.orders || []).length;
     $("c-journal").textContent = (S.trades || []).length;
-    $("c-alerts").textContent = (S.alerts || []).length;
+    $("c-alerts").textContent = (S.alerts || []).length + (S.pending || []).length;
     if (S.tab === "positions") body.innerHTML = positionsHtml(positions);
     else if (S.tab === "orders") body.innerHTML = ordersHtml();
     else if (S.tab === "journal") body.innerHTML = journalHtml();
     else if (S.tab === "cycles") body.innerHTML = cyclesHtml();
     else if (S.tab === "alerts") body.innerHTML = alertsHtml();
+    else if (S.tab === "reports") body.innerHTML = reportsHtml();
+  }
+
+  function reportsHtml() {
+    const r = S.reports || [];
+    return `<div style="padding:10px 14px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center"><span class="muted" style="font-size:12px">Claude writes a trading diary every day (and sends it to Telegram if linked).</span><div class="spacer"></div><button class="btn small" data-action="report">Write today's report now</button></div>` +
+      (r.length ? r.map((x) => `<div class="report-card"><b style="color:var(--text)">&#128211; ${esc(x.day)}</b> <span class="dim" style="font-size:11px">${fmt.dt(x.ts)}</span>\n${esc(x.text)}</div>`).join("") : `<div class="empty">No daily reports yet.</div>`);
+  }
+
+  // ------------------------------------------------------------------ war room
+  const STATUS_TXT = { working: "analyzing...", waiting: "waiting", done: "reported", off: "off (solo mode)", idle: "idle", error: "failed" };
+  const PHASE = { chartist: "Phase 1 · parallel", macro: "Phase 1 · parallel", flow: "Phase 1 · parallel", risk: "Phase 2 · challenge", pm: "Phase 3 · decision" };
+
+  function pmReport() {
+    const o = S.outlook;
+    return o ? { stance: o.bias, headline: o.regime, summary: o.summary, confidence: null } : null;
+  }
+
+  function renderTeam() {
+    const t = S.team; if (!t || !t.meta) return;
+    const solo = String(t.mode || "").startsWith("solo") || t.desk_mode === "solo";
+    $("team-mode").textContent = t.mode || t.desk_mode;
+    $("team-cycle").textContent = t.cycle_id ? `cycle #${t.cycle_id} · analysts ${t.analyst_model} · head trader ${t.pm_model}` : `analysts ${t.analyst_model} · head trader ${t.pm_model}`;
+    $("team").innerHTML = t.order.map((k) => {
+      const m = t.meta[k]; const a = (t.agents || {})[k] || {};
+      const rep = k === "pm" ? (a.status === "working" ? null : pmReport()) : a.report;
+      let status = a.status || (solo && k !== "pm" ? "off" : "idle");
+      const stTxt = k === "pm" ? ({ working: "deciding...", waiting: "waiting for the desk", done: "decided" }[status] || STATUS_TXT[status]) : STATUS_TXT[status] || status;
+      const conf = rep && isNum(rep.confidence) ? Math.round(rep.confidence * 100) : null;
+      const stanceCls = rep ? (rep.stance === "bullish" ? "long" : rep.stance === "bearish" ? "short" : "neutral") : "neutral";
+      const ideas = (rep?.ideas || []).slice(0, 3).map((i) => `<span class="pill ${i.side === "long" ? "long" : "short"}">${esc(sym(i.symbol))} ${i.side === "long" ? "L" : "S"}</span>`).join("");
+      const veto = (rep?.veto || []).slice(0, 3).map((v) => `<span class="pill short">veto ${esc(String(v).slice(0, 18))}</span>`).join("");
+      const foot = rep && (rep.turns || rep.seconds) ? `${rep.turns ?? "-"} turns · ${rep.seconds ?? "-"}s` : (a.ts ? fmt.ago(a.ts) : "");
+      return `<div class="agent ${status}" data-agent="${k}">
+        <div class="phase">${PHASE[k]}</div>
+        <div class="top"><div class="av" style="background:${m.color}22;border:1px solid ${m.color}66">${m.emoji}</div>
+          <div style="min-width:0"><div class="nm">${esc(m.name)}</div><div class="st">${esc(stTxt)}</div></div>
+          <div class="spacer"></div>${rep && rep.stance ? `<span class="pill ${stanceCls}">${esc(rep.stance)}</span>` : ""}</div>
+        ${conf !== null ? `<div class="conf" title="confidence ${conf}%"><i style="width:${conf}%;background:${m.color}"></i></div>` : ""}
+        <div class="hl">${rep ? esc(rep.headline || "") : (status === "working" ? "Working on it..." : '<span class="dim">No report yet</span>')}</div>
+        <div class="sm">${rep ? esc(rep.error || rep.summary || "") : ""}</div>
+        ${ideas || veto ? `<div class="ideas">${ideas}${veto}</div>` : ""}
+        <div class="foot">${esc(foot)}</div></div>`;
+    }).join("");
+  }
+
+  async function openAgent(k) {
+    const t = S.team; if (!t) return;
+    const m = t.meta[k]; const a = (t.agents || {})[k] || {};
+    const rep = k === "pm" ? pmReport() : a.report;
+    let html = "";
+    if (rep) {
+      html += `<div class="outlook-head"><span class="bias ${esc(rep.stance || "neutral")}">${esc(rep.stance || "-")}</span><b>${esc(rep.headline || "")}</b>${isNum(rep.confidence) ? `<span class="muted">confidence ${Math.round(rep.confidence * 100)}%</span>` : ""}</div>`;
+      if (rep.error) html += `<div class="banner err">${esc(rep.error)}</div>`;
+      html += `<div class="outlook-sum" style="margin-bottom:10px">${richText(rep.summary || "")}</div>`;
+      if (rep.key_points?.length) html += `<div class="form-sec">Key points</div><ul style="margin:0;padding-left:18px;line-height:1.6">${rep.key_points.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
+      if (rep.ideas?.length) html += `<div class="form-sec">Ideas</div><table><thead><tr><th>Symbol</th><th>Side</th><th class="num">Entry</th><th class="num">Stop</th><th class="num">Target</th><th>Setup</th><th class="num">Conv.</th></tr></thead><tbody>${rep.ideas.map((i) => `<tr><td><b>${esc(sym(i.symbol))}</b></td><td><span class="pill ${i.side}">${esc(i.side)}</span></td><td class="num">${fmt.price(i.entry)}</td><td class="num">${fmt.price(i.stop)}</td><td class="num">${fmt.price(i.target)}</td><td>${esc(i.setup || "")}</td><td class="num">${i.conviction ?? "-"}</td></tr><tr class="detail"><td colspan="7">${esc(i.rationale || "")}</td></tr>`).join("")}</tbody></table>`;
+      if (rep.warnings?.length) html += `<div class="form-sec">Warnings</div>${rep.warnings.map((w) => `<div class="m-notice" style="padding-left:0">&#9888; ${esc(w)}</div>`).join("")}`;
+      if (rep.veto?.length) html += `<div class="form-sec">Veto</div>${rep.veto.map((w) => `<span class="pill short" style="margin-right:4px">${esc(w)}</span>`).join("")}`;
+      if (isNum(rep.max_risk_pct)) html += `<div class="form-sec">Recommended max risk</div><div class="mono">${rep.max_risk_pct}% per trade</div>`;
+    } else html += `<div class="empty">No report yet.</div>`;
+    $("agent-title").innerHTML = `${m.emoji} ${esc(m.name)}`;
+    $("agent-body").innerHTML = html + `<div class="form-sec">Its thinking this cycle</div><div id="agent-log" class="muted">Loading...</div>`;
+    $("agent-overlay").classList.add("open");
+    if (t.cycle_id) {
+      try {
+        const r = await api(`/api/cycles/${t.cycle_id}`);
+        const evs = r.events.filter((e) => (e.data?.agent || "pm") === k && ["thought", "tool_call"].includes(e.kind));
+        $("agent-log").innerHTML = evs.length ? evs.map((e) => e.kind === "thought" ? `<div class="m-thought" style="margin:6px 0">${avatar(k)}<div class="tx">${richText(e.data.text)}</div></div>` : `<div class="m-tool" style="margin:4px 0 4px 33px"><summary style="display:inline-flex">&#9881; ${esc(e.data.name)} ${esc(JSON.stringify(e.data.input || {}).slice(0, 120))}</summary></div>`).join("") : "Nothing recorded.";
+      } catch (e) { $("agent-log").textContent = "Unavailable."; }
+    } else { $("agent-log").textContent = "No cycle yet."; }
+  }
+
+  // ------------------------------------------------------------------ liquidation radar
+  function renderLiq(fresh = []) {
+    const L = S.liq; if (!L) return;
+    const s = L.summary || {};
+    $("liq-status").textContent = s.status || "-";
+    const longs = s.longs_liquidated_usd || 0, shorts = s.shorts_liquidated_usd || 0, tot = longs + shorts;
+    const lp = tot ? (longs / tot) * 100 : 50;
+    const b = L.buckets || [];
+    const max = Math.max(1, ...b.map((x) => x.longs + x.shorts));
+    const W = 100 / Math.max(1, b.length);
+    const bars = b.map((x, i) => {
+      const hl = (x.longs / max) * 46, hs = (x.shorts / max) * 46;
+      return `<rect x="${(i * W + W * 0.12).toFixed(2)}%" y="${(48 - hl).toFixed(1)}" width="${(W * 0.76).toFixed(2)}%" height="${hl.toFixed(1)}" fill="#f0475b" rx="1.5"/><rect x="${(i * W + W * 0.12).toFixed(2)}%" y="50" width="${(W * 0.76).toFixed(2)}%" height="${hs.toFixed(1)}" fill="#18c98a" rx="1.5"/>`;
+    }).join("");
+    const top = (s.by_symbol || []).slice(0, 6).map((x) => `<span class="tag coin" data-chart="${esc(x.symbol)}" style="cursor:pointer">${esc(sym(x.symbol))} ${fmt.big(x.longs_usd + x.shorts_usd)}</span>`).join(" ");
+    $("liq-top").innerHTML = `<div style="display:flex;justify-content:space-between;font-size:12.5px;font-family:var(--mono)"><span class="down">longs rekt ${fmt.big(longs)}</span><b>${fmt.big(tot)} total · ${esc(s.dominant || "-")}</b><span class="up">shorts rekt ${fmt.big(shorts)}</span></div>
+      <div class="liq-bar"><i style="width:${lp}%;background:var(--red)"></i><i style="width:${100 - lp}%;background:var(--green)"></i></div>
+      <svg width="100%" height="98" style="display:block">${bars}<line x1="0" x2="100%" y1="49" y2="49" stroke="#26304a"/></svg>
+      <div class="muted" style="font-size:11px;margin:2px 0 6px">last 2 hours, 5-minute buckets · red = longs liquidated (forced selling), green = shorts liquidated (forced buying)</div><div>${top}</div>`;
+    const freshKeys = new Set(fresh.map((e) => e.ts + e.symbol));
+    $("liq-feed").innerHTML = (L.recent || []).slice(0, 40).map((e) => `<div class="liq-row ${freshKeys.has(e.ts + e.symbol) ? "new " + e.side : ""}">
+      <span class="dim mono" style="min-width:52px">${fmt.ago(e.ts).replace(" ago", "")}</span><b style="min-width:70px" data-chart="${esc(e.symbol)}">${esc(sym(e.symbol))}</b>
+      <span class="pill ${e.side === "long" ? "short" : "long"}">${e.side === "long" ? "LONG rekt" : "SHORT rekt"}</span>
+      <span class="spacer"></span><span class="mono">${fmt.usd(e.usd, 0)}</span><span class="dim mono" style="min-width:80px;text-align:right">@ ${fmt.price(e.price)}</span></div>`).join("") || `<div class="empty">${s.status === "live" ? "Quiet: no liquidations in the window." : "Radar " + esc(s.status || "off") + "."}</div>`;
+  }
+
+  // ------------------------------------------------------------------ correlations
+  async function loadCorr() {
+    try { S.corr = await api("/api/correlations"); renderCorr(); } catch (e) { $("corr").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  }
+  function renderCorr() {
+    const c = S.corr; if (!c || !c.symbols) return;
+    const syms = c.symbols, m = c.matrix;
+    if (!m.length) { $("corr").innerHTML = `<div class="empty">Not enough data.</div>`; return; }
+    const col = (v) => v >= 0 ? `rgba(139,108,255,${(0.12 + v * 0.88).toFixed(2)})` : `rgba(25,211,245,${(0.12 - v * 0.88).toFixed(2)})`;
+    const head = `<tr><th></th>${syms.map((s) => `<th>${esc(sym(s))}</th>`).join("")}</tr>`;
+    const rows = syms.map((s, i) => `<tr><th style="text-align:right">${esc(sym(s))}</th>${m[i].map((v, j) => `<td><div style="background:${col(v)}" title="${esc(sym(s))}/${esc(sym(syms[j]))} ${v}">${i === j ? "" : v.toFixed(2)}</div></td>`).join("")}</tr>`).join("");
+    const beta = `<tr><th style="text-align:right">β BTC</th>${syms.map((s) => `<td><div style="background:var(--panel2);color:var(--muted)">${c.beta?.[s] ?? "-"}</div></td>`).join("")}</tr>`;
+    const ex = c.exposure || {};
+    const pairs = (c.highly_correlated_pairs || []).slice(0, 4).map((p) => `${esc(sym(p.a))}/${esc(sym(p.b))} ${p.corr}`).join(" · ");
+    $("corr").innerHTML = `<div style="overflow-x:auto"><table class="heat">${head}${rows}${beta}</table></div>
+      <div class="mono" style="font-size:12px;margin-top:10px;display:flex;gap:16px;flex-wrap:wrap">
+        <span>gross <b>${fmt.usd(ex.gross_usd, 0)}</b> (${ex.gross_x_equity ?? 0}x)</span><span>net <b class="${cls(ex.net_usd)}">${fmt.signed(ex.net_usd, 0)}</b></span>
+        <span>BTC-beta net <b class="${cls(ex.btc_beta_net_usd)}">${fmt.signed(ex.btc_beta_net_usd, 0)}</b> (${ex.btc_beta_net_x_equity ?? 0}x equity)</span></div>
+      ${pairs ? `<div class="muted" style="font-size:11.5px;margin-top:6px">Most correlated: ${pairs}</div>` : ""}`;
   }
 
   function positionsHtml(positions) {
@@ -305,8 +440,14 @@
 
   function alertsHtml() {
     const a = S.alerts || [];
-    if (!a.length) return `<div class="empty">No active alerts. Claude sets alerts on key levels so it is woken when price gets there.</div>`;
-    return `<table><thead><tr><th>Symbol</th><th>When</th><th class="num">Price</th><th>Note</th><th>Set</th><th></th></tr></thead><tbody>${a.map((x) => `
+    const p = S.pending || [];
+    const pend = p.length ? `<div class="form-sec" style="margin:10px 14px 4px">Pending entries: fire automatically through the risk gate</div><table><thead><tr><th>Symbol</th><th>Side</th><th>Fires when</th><th class="num">Entry</th><th class="num">Stop</th><th class="num">Target</th><th>Expires</th><th></th></tr></thead><tbody>${p.map((x) => `
+      <tr><td><b>${esc(sym(x.symbol))}</b></td><td><span class="pill ${x.side}">${x.side.toUpperCase()}</span></td><td>price ${esc(x.condition)}</td><td class="num">${fmt.price(x.entry)}</td>
+      <td class="num down">${fmt.price(x.stop_loss)}</td><td class="num up">${fmt.price(x.take_profit)}</td><td class="dim">in ${fmt.dur(x.expires_at - Date.now() / 1000)}</td>
+      <td><button class="btn small" data-cancel-pending="${x.id}">Cancel</button></td></tr>
+      <tr class="detail"><td colspan="8">${esc((x.thesis || "").slice(0, 300))}</td></tr>`).join("")}</tbody></table>` : "";
+    if (!a.length) return pend + `<div class="empty">No active price alerts. Claude sets alerts on key levels so it is woken when price gets there.</div>`;
+    return pend + `<div class="form-sec" style="margin:10px 14px 4px">Price alerts: wake Claude</div><table><thead><tr><th>Symbol</th><th>When</th><th class="num">Price</th><th>Note</th><th>Set</th><th></th></tr></thead><tbody>${a.map((x) => `
       <tr><td><b>${esc(sym(x.symbol))}</b></td><td>${esc(x.condition)}</td><td class="num">${fmt.price(x.price)}</td><td style="white-space:normal">${esc(x.note || "")}</td>
       <td class="dim">${fmt.ago(x.created_at)}</td><td><button class="btn small" data-cancel-alert="${x.id}">Cancel</button></td></tr>`).join("")}</tbody></table>`;
   }
@@ -335,9 +476,12 @@
       case "cycle_start":
         mindAdd(div("m-cycle", `Cycle #${d.cycle_id} · ${esc(d.trigger)} · ${fmt.time(msg.ts)}`));
         break;
-      case "thought":
-        mindAdd(div("m-thought", `<div class="av">T</div><div class="tx">${richText(d.text)}</div>`));
+      case "thought": {
+        const m = agentMeta(d.agent);
+        const who = d.agent && d.agent !== "pm" ? `<div class="m-who" style="color:${m.color}">${esc(m.name)}</div>` : "";
+        mindAdd(div("m-thought", `${avatar(d.agent)}<div class="tx">${who}${richText(d.text)}</div>`));
         break;
+      }
       case "thinking": {
         const n = div("m-thinking", esc(d.text));
         n.title = "Claude's private reasoning (click to expand)";
@@ -350,7 +494,8 @@
         det.className = "m-tool";
         const args = d.input && Object.keys(d.input).length ? JSON.stringify(d.input, null, 1) : "";
         const brief = d.input ? Object.entries(d.input).filter(([k]) => ["symbol", "side", "stop_loss", "take_profit", "fraction", "condition", "price"].includes(k)).map(([, v]) => v).join(" ") : "";
-        det.innerHTML = `<summary>&#9881; ${esc(d.name)} ${esc(brief)}</summary>${args ? `<pre>${esc(args)}</pre>` : ""}`;
+        const tag = d.agent && d.agent !== "pm" ? agentMeta(d.agent).emoji + " " : "";
+        det.innerHTML = `<summary>${tag}&#9881; ${esc(d.name)} ${esc(brief)}</summary>${args ? `<pre>${esc(args)}</pre>` : ""}`;
         if (d.id) S.toolEls[d.id] = det;
         mindAdd(det);
         break;
@@ -394,6 +539,7 @@
   // ------------------------------------------------------------------ outlook / watch / scanner / news
   function renderOutlook(o) {
     if (!o) return;
+    S.outlook = o;
     $("outlook-time").textContent = fmt.ago(o.ts);
     const watch = (o.watch || []).map((w) => `<div class="watch-row"><b class="clickable" data-chart="${esc(w.symbol)}" style="cursor:pointer">${esc(sym(w.symbol))}</b>${w.bias ? `<span class="pill ${w.bias === "bullish" || w.bias === "long" ? "long" : w.bias === "bearish" || w.bias === "short" ? "short" : "neutral"}">${esc(w.bias)}</span>` : ""}<span class="muted">${esc(w.note || "")}</span></div>`).join("");
     $("outlook").innerHTML = `<div class="outlook-head"><span class="bias ${esc(o.bias)}">${esc(o.bias)}</span><b>${esc(o.regime)}</b>${o.next_check_minutes ? `<span class="muted" style="font-size:12px">next look in ${o.next_check_minutes}m</span>` : ""}</div>
@@ -542,6 +688,17 @@
       ["claude_allow_web", "Web search for news", "bool", "lets Claude use WebSearch/WebFetch"],
       ["chat_can_trade", "Chat can trade", "bool", "allow trades from Ask Tushar"],
     ]],
+    ["Desk (multi-agent)", [
+      ["desk_mode", "Desk mode", ["team", "solo"], "team = analysts + risk officer + head trader"],
+      ["analyst_model", "Analyst model", "text", "haiku is light on usage; sonnet is sharper"],
+      ["analyst_max_turns", "Analyst max turns", "number", "tool calls per analyst"],
+      ["team_on_events", "Full team on alert/stop cycles", "bool", "off = head trader alone (faster)"],
+    ]],
+    ["Notifications", [
+      ["telegram_cycle_summaries", "Telegram: every cycle summary", "bool", "trades and alerts are always sent"],
+      ["daily_report", "Daily report", "bool", "Claude's end-of-day diary"],
+      ["daily_report_hour_utc", "Daily report hour (UTC)", "number", "0-23"],
+    ]],
     ["Schedule", [
       ["cycle_minutes", "Cycle every (min)", "number", "Claude can ask for sooner/later"],
       ["min_cycle_gap_minutes", "Min gap between cycles (min)", "number", ""],
@@ -582,7 +739,7 @@
       else if (Array.isArray(type)) input = `<select data-key="${k}">${type.map((o) => `<option value="${o}"${o === v ? " selected" : ""}>${o || "default"}</option>`).join("")}</select>`;
       else input = `<input data-key="${k}" data-type="${type}" value="${esc(v ?? "")}" ${type === "number" ? 'inputmode="decimal"' : ""}>`;
       return `<div class="field"><label>${label}</label>${input}${hint ? `<div class="hint">${hint}</div>` : ""}</div>`;
-    }).join("")}</div>`).join("") + `<div class="form-sec">Fixed at startup (.env)</div><div class="muted mono" style="font-size:12px;line-height:1.7">mode ${esc(s.mode_label)} · brain ${esc(s.brain)} · margin ${esc(s.margin_type)} · Binance keys ${s.binance_api_key ? "set" : "not set"} · dashboard password ${s.dashboard_password ? "set" : "not set"}</div>`;
+    }).join("")}</div>`).join("") + `<div class="form-sec">Fixed at startup (.env)</div><div class="muted mono" style="font-size:12px;line-height:1.7">mode ${esc(s.mode_label)} · brain ${esc(s.brain)} · margin ${esc(s.margin_type)} · Binance keys ${s.binance_api_key ? "set" : "not set"} · dashboard password ${s.dashboard_password ? "set" : "not set"} · telegram ${s.telegram_bot_token ? "on" : "off"} · liquidation radar ${s.liquidation_radar ? "on" : "off"}</div>`;
   }
 
   async function saveSettings() {
@@ -651,7 +808,7 @@
   // ------------------------------------------------------------------ data
   function applyState(st) {
     S.settings = st.settings; S.account = st.account; S.orders = st.orders; S.openTrades = st.open_trades || [];
-    S.trades = st.trades || []; S.stats = st.stats; S.sod = st.start_of_day_equity; S.cycles = st.cycles; S.alerts = st.alerts;
+    S.pending = st.pending || []; S.trades = st.trades || []; S.stats = st.stats; S.sod = st.start_of_day_equity; S.cycles = st.cycles; S.alerts = st.alerts;
     S.tickers = { ...S.tickers, ...(st.tickers || {}) };
     const set = st.settings || {};
     const mb = $("mode-badge");
@@ -660,6 +817,8 @@
     renderStatus(st.status);
     renderKpis(); renderBook(); renderWatch(); renderOutlook(st.outlook); renderScanner(st.scanner);
     renderNews(st.news, st.fng, st.news_status); renderMemory(st.memories); renderPerf(st.stats); renderEquity(st.equity);
+    S.team = st.team; S.liq = st.liquidations; S.reports = st.daily_reports || [];
+    renderTeam(); renderLiq();
     if (st.sim && (!S.lastSim || S.lastSimId !== st.sim.id)) { S.lastSimId = st.sim.id; renderSim(st.sim); }
   }
 
@@ -700,26 +859,43 @@
           if (S.tab === "positions") renderBook(); else { $("c-positions").textContent = (d.positions || []).length; }
           break;
         case "status": renderStatus(d); break;
-        case "outlook": renderOutlook(d); break;
+        case "outlook": renderOutlook(d); renderTeam(); break;
+        case "team": S.team = d; renderTeam(); break;
+        case "agent_status":
+          if (S.team) { S.team.agents = S.team.agents || {}; S.team.agents[d.agent] = { ...(S.team.agents[d.agent] || {}), status: d.status, ts: msg.ts }; renderTeam(); }
+          break;
+        case "agent_report":
+          if (S.team) { S.team.agents[d.agent] = { ...(S.team.agents[d.agent] || {}), status: d.report.error ? "error" : "done", report: d.report, ts: msg.ts }; renderTeam(); }
+          break;
+        case "liquidations":
+          if (S.liq) { S.liq.recent = [...d.events.slice().reverse(), ...(S.liq.recent || [])].slice(0, 60); S.liq.summary = { ...S.liq.summary, ...d.summary }; renderLiq(d.events); }
+          break;
+        case "daily_report":
+          S.reports = [d, ...(S.reports || [])]; toast("Daily report is ready (Journal > Daily reports)", "good"); if (S.tab === "reports") renderBook();
+          speak("Daily report is ready.");
+          break;
         case "scanner": renderScanner(d); break;
         case "news": refresh(); break;
         case "sim": S.lastSimId = d.id; renderSim(d); break;
         case "alerts": S.alerts = d; renderBook(); break;
+        case "pending": S.pending = d; renderBook(); break;
         case "memory": case "trade_review": refresh(); break;
         case "settings": S.settings = d; break;
         case "usage": if (S.st) { S.st.usage = d; renderStatus(S.st); } break;
         case "trade_open":
           toast(`Opened ${d.trade.side.toUpperCase()} ${sym(d.trade.symbol)} @ ${fmt.price(d.trade.entry_price)}`, "good");
+          speak(`Opened ${d.trade.side} ${sym(d.trade.symbol)} at ${fmt.price(d.trade.entry_price)}`);
           refresh().then(() => { if (d.trade.symbol === S.symbol) loadChart(); });
           break;
         case "trade_close":
           if (d.trade) toast(`Closed ${sym(d.trade.symbol)}: ${fmt.signed(d.trade.pnl)} (${d.trade.exit_reason})`, (d.trade.pnl || 0) >= 0 ? "good" : "bad");
+          if (d.trade) speak(`Closed ${sym(d.trade.symbol)}, ${(d.trade.pnl || 0) >= 0 ? "profit" : "loss"} of ${Math.abs(d.trade.pnl || 0).toFixed(0)} dollars`);
           refresh().then(() => loadChart());
           break;
         case "protection": refresh().then(drawPriceLines); break;
-        case "cycle_end": refresh(); break;
+        case "cycle_end": refresh(); if (d.summary) speak(String(d.summary).split(/(?<=[.!?])\s/)[0]); break;
         case "notice": toast(d.text, d.level === "warn" ? "warn" : ""); break;
-        case "alert_hit": toast(d.text, "warn"); break;
+        case "alert_hit": toast(d.text, "warn"); speak(d.text); break;
         case "chat":
           if (d.role === "tushar") { if (chatPending) { chatPending.remove(); chatPending = null; } chatMsg("tushar", d.text); }
           break;
@@ -733,8 +909,15 @@
 
   // ------------------------------------------------------------------ events
   document.addEventListener("click", async (ev) => {
-    const t = ev.target.closest("[data-chart],[data-close],[data-trade],[data-cycle],[data-cancel-alert],[data-forget],[data-tab],[data-iv]");
+    const t = ev.target.closest("[data-chart],[data-close],[data-trade],[data-cycle],[data-cancel-alert],[data-cancel-pending],[data-forget],[data-tab],[data-iv],[data-agent],[data-action]");
     if (!t) return;
+    if (t.dataset.agent) { openAgent(t.dataset.agent); return; }
+    if (t.dataset.action === "report") {
+      t.textContent = "Claude is writing...";
+      try { await api("/api/control/report", { method: "POST" }); } catch (e) { toast(e.message, "bad"); }
+      t.textContent = "Write today's report now";
+      return;
+    }
     if (t.dataset.close !== undefined && t.closest(".overlay") && !t.dataset.close) { t.closest(".overlay").classList.remove("open"); return; }
     if (t.dataset.close) {
       ev.stopPropagation();
@@ -743,6 +926,7 @@
       catch (e) { toast(e.message, "bad"); }
       return;
     }
+    if (t.dataset.cancelPending) { await api(`/api/pending/${t.dataset.cancelPending}/cancel`, { method: "POST" }); refresh(); return; }
     if (t.dataset.cancelAlert) { await api(`/api/alerts/${t.dataset.cancelAlert}/cancel`, { method: "POST" }); refresh(); return; }
     if (t.dataset.forget) { await api(`/api/memories/${t.dataset.forget}/forget`, { method: "POST" }); refresh(); return; }
     if (t.dataset.tab) { S.tab = t.dataset.tab; document.querySelectorAll("#book-tabs button").forEach((b) => b.classList.toggle("on", b === t)); renderBook(); return; }
@@ -772,6 +956,43 @@
   $("btn-scan").onclick = async () => { $("btn-scan").textContent = "Scanning..."; try { await api("/api/control/scan", { method: "POST" }); } finally { $("btn-scan").textContent = "Rescan"; } };
   $("btn-news").onclick = async () => { $("btn-news").textContent = "..."; try { const r = await api("/api/control/news", { method: "POST" }); toast(`${r.new} new headline(s)`); refresh(); } finally { $("btn-news").textContent = "Refresh"; } };
   $("btn-settings").onclick = () => { renderSettingsForm(); $("settings-overlay").classList.add("open"); };
+  const voiceBtn = () => { $("btn-voice").innerHTML = voice ? "&#128266;" : "&#128263;"; $("btn-voice").title = voice ? "Voice on" : "Voice off"; };
+  voiceBtn();
+  $("btn-voice").onclick = () => {
+    voice = !voice; try { localStorage.setItem("tushar.voice", voice ? "1" : "0"); } catch (e) { /* ignore */ }
+    voiceBtn(); if (voice) speak("Tushar voice is on."); toast(voice ? "Voice announcements on" : "Voice off");
+  };
+  $("btn-corr").onclick = loadCorr;
+  $("btn-phone").onclick = async () => {
+    let n;
+    try { n = await api("/api/network"); } catch (e) { toast(e.message, "bad"); return; }
+    const here = location.hostname !== "127.0.0.1" && location.hostname !== "localhost" ? `${location.protocol}//${location.host}` : null;
+    const urls = n.urls && n.urls.length ? n.urls : (here ? [here] : []);
+    let html;
+    if (!n.phone_ready && !here) {
+      html = `<p style="line-height:1.6">The dashboard is only listening on this computer right now. Stop it (Ctrl+C) and start it in phone mode:</p>
+        <div class="ev-log" style="font-size:14px;color:var(--text)">run.bat phone</div>
+        <p class="muted" style="font-size:12.5px;line-height:1.6">Mac/Linux: <code>./run.sh phone</code>. It prints a link and a PIN. Then click this button again for a QR code. Your phone must be on the same Wi-Fi.</p>`;
+    } else if (!urls.length) {
+      html = `<p>No Wi-Fi/LAN address found on this computer.</p>`;
+    } else {
+      const url = urls[0];
+      let svg = "";
+      try { const qr = qrcode(0, "M"); qr.addData(url); qr.make(); svg = qr.createSvgTag(7, 3); } catch (e) { svg = ""; }
+      html = `<div style="text-align:center"><div style="background:#fff;display:inline-block;padding:10px;border-radius:14px">${svg}</div>
+        <div class="mono" style="font-size:16px;margin:12px 0 4px"><b>${esc(url)}</b></div>
+        ${urls.slice(1).map((u) => `<div class="mono muted" style="font-size:12px">or ${esc(u)}</div>`).join("")}</div>
+        <ol style="line-height:1.7;font-size:13px;margin:14px 0 0;padding-left:20px">
+          <li>Connect your phone to the <b>same Wi-Fi</b> as this computer.</li>
+          <li>Scan the QR code with the camera and open the link.</li>
+          <li>${n.password_set ? "Enter the dashboard password / PIN shown in the terminal." : "<span class='down'>No password is set: anyone on this Wi-Fi can open it.</span>"}</li>
+          <li>Tap <b>Share &gt; Add to Home Screen</b> (iPhone) or <b>&#8942; &gt; Add to Home screen</b> (Android) to use it like an app.</li>
+        </ol>
+        <p class="muted" style="font-size:12px;line-height:1.6;margin-top:10px">Doesn't load? Allow Python through the Windows firewall on private networks. Away from home? Use Tailscale on both devices, or the Telegram bot.</p>`;
+    }
+    $("phone-body").innerHTML = html;
+    $("phone-overlay").classList.add("open");
+  };
   $("settings-save").onclick = saveSettings;
   document.querySelectorAll("[data-close]").forEach((b) => { if (!b.dataset.close) b.addEventListener("click", () => b.closest(".overlay").classList.remove("open")); });
   document.querySelectorAll(".overlay").forEach((o) => o.addEventListener("click", (e) => { if (e.target === o) o.classList.remove("open"); }));
@@ -784,6 +1005,9 @@
 
   refresh(true);
   connect();
+  setTimeout(loadCorr, 1500);
+  setInterval(loadCorr, 300000);
+  setInterval(() => { if (S.liq) renderLiq(); }, 15000);
   setInterval(tickClock, 1000);
   setInterval(() => refresh(), 30000);
   window.addEventListener("resize", () => { if (S.lastSim) drawFan(S.lastSim); });

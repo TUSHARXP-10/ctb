@@ -10,7 +10,7 @@ import time
 from decimal import Decimal
 from typing import Callable, Optional
 
-from .base import Account, ExchangeError, Fill, Order, Position, dec
+from .base import Account, ExchangeError, Fill, Order, Position
 
 SLIPPAGE = 0.0002          # 0.02 % against you on every market fill
 MAINT_MARGIN_RATE = 0.005  # rough maintenance margin for the liquidation estimate

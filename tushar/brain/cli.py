@@ -30,13 +30,14 @@ DECISION_SCHEMA = {
             "text": {"type": "string"}, "kind": {"type": "string"}, "importance": {"type": "integer"},
             "symbol": {"type": "string"}}, "required": ["text"]}},
         "actions": {"type": "array", "items": {"type": "object", "properties": {
-            "type": {"type": "string", "enum": ["open", "close", "update_protection", "set_alert", "cancel_alert"]},
+            "type": {"type": "string", "enum": ["open", "pending_entry", "close", "update_protection", "set_alert", "cancel_alert"]},
             "symbol": {"type": "string"}, "side": {"type": "string", "enum": ["long", "short"]},
             "stop_loss": {"type": "number"}, "take_profit": {"type": "number"}, "risk_pct": {"type": "number"},
             "leverage": {"type": "integer"}, "confidence": {"type": "number"}, "setup": {"type": "string"},
             "thesis": {"type": "string"}, "fraction": {"type": "number"}, "reason": {"type": "string"},
             "condition": {"type": "string", "enum": ["above", "below"]}, "price": {"type": "number"},
-            "note": {"type": "string"}, "alert_id": {"type": "integer"}}, "required": ["type"]}},
+            "note": {"type": "string"}, "alert_id": {"type": "integer"}, "entry": {"type": "number"},
+            "expires_hours": {"type": "number"}}, "required": ["type"]}},
         "outlook": {"type": "object", "properties": {
             "regime": {"type": "string"}, "bias": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
             "summary": {"type": "string"}, "next_check_minutes": {"type": "integer"},
@@ -54,6 +55,7 @@ main candidates. Decide, then answer ONLY with the JSON object described by the 
 - "reviews": one per closed trade listed for review.
 - "actions": in order. "open" needs symbol, side, stop_loss, take_profit, thesis (risk_pct, leverage,
   confidence, setup optional). Each open passes the same risk gate and Time Machine check; a BLOCK is final.
+  "pending_entry" is the same plus "entry": it fires automatically when price reaches that level.
   "close" needs symbol, reason (fraction optional). "update_protection" needs symbol and stop_loss and/or
   take_profit. "set_alert" needs symbol, condition, price, note.
 - "outlook": always.
@@ -101,9 +103,11 @@ class CliBrain:
         if not path:
             try:  # the Agent SDK ships its own copy of Claude Code
                 import claude_agent_sdk
-                bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
-                if bundled.exists():
-                    path = str(bundled)
+                base = Path(claude_agent_sdk.__file__).parent / "_bundled"
+                for name in ("claude.exe", "claude"):
+                    if (base / name).exists():
+                        path = str(base / name)
+                        break
             except ImportError:
                 pass
         if not path:
@@ -177,8 +181,10 @@ class CliBrain:
             parts += ["## Time Machine on 1.5 ATR stop / 3 ATR target plans for top scanner hits"] + tm_parts
         return "\n".join(parts)
 
-    async def run_cycle(self, briefing: str, cycle_id: int) -> dict:
+    async def run_cycle(self, briefing: str, cycle_id: int, trigger: str = "") -> dict:
         engine, desk, bus = self.engine, self.engine.desk, self.engine.bus
+        engine.team_mode_note(cycle_id, "solo (cli brain)")
+        engine.agent_status(cycle_id, "pm", "working")
         prompt = briefing + "\n\n" + await self._deep_analysis()
         bus.publish("thought", {"cycle_id": cycle_id, "text": "Thinking (claude -p, single pass)..."})
         raw = await self._run(prompt, SYSTEM_PROMPT + CLI_INSTRUCTIONS, DECISION_SCHEMA)
@@ -218,6 +224,11 @@ class CliBrain:
                 await do("open_position", desk.open_position(
                     a.get("symbol", ""), a.get("side", ""), a.get("stop_loss") or 0, a.get("take_profit") or 0,
                     a.get("risk_pct"), a.get("leverage"), a.get("confidence"), a.get("setup", ""), a.get("thesis", "")), a)
+            elif t == "pending_entry":
+                await do("place_pending_entry", desk.place_pending_entry(
+                    a.get("symbol", ""), a.get("side", ""), a.get("entry") or 0, a.get("stop_loss") or 0,
+                    a.get("take_profit") or 0, a.get("thesis", ""), a.get("risk_pct"), a.get("leverage"),
+                    a.get("confidence"), a.get("setup", ""), a.get("expires_hours") or 12), a)
             elif t == "close":
                 await do("close_position", desk.close_position(a.get("symbol", ""), a.get("fraction") or 1.0,
                                                                a.get("reason", "")), a)
@@ -235,6 +246,7 @@ class CliBrain:
                                                              o.get("summary", ""), o.get("watch"),
                                                              o.get("next_check_minutes")), o)
         result["summary"] = (o.get("summary") or decision.get("analysis") or "")[:1500]
+        engine.agent_status(cycle_id, "pm", "done")
         return result
 
     async def chat(self, message: str, history: list[dict]) -> str:
@@ -248,3 +260,8 @@ class CliBrain:
                   "the owner. Be direct and specific. You cannot place trades from this chat.")
         raw = await self._run(prompt, system, None, timeout=300)
         return (raw.get("result") or "(no answer)").strip()
+
+    async def daily_report(self, context: str) -> str:
+        from .prompts import DAILY_PROMPT
+        raw = await self._run(context, DAILY_PROMPT, None, timeout=300)
+        return (raw.get("result") or "").strip()

@@ -41,9 +41,25 @@ def _json(obj) -> str:
     return json.dumps(_clean(obj))
 
 
+def _session_secret(data_dir: str) -> str:
+    """Stable per-install secret so dashboard logins survive restarts."""
+    path = Path(data_dir) / ".session_secret"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            value = path.read_text().strip()
+            if len(value) >= 32:
+                return value
+        value = secrets.token_hex(32)
+        path.write_text(value)
+        return value
+    except OSError:
+        return secrets.token_hex(32)
+
+
 def create_app(settings: Settings | None = None, engine: Engine | None = None, start_loops: bool = True) -> FastAPI:
     settings = settings or Settings.from_env()
-    secret = secrets.token_hex(16)
+    secret = _session_secret(settings.data_dir)
 
     def session_token() -> str:
         return hmac.new(secret.encode(), settings.dashboard_password.encode(), hashlib.sha256).hexdigest()
@@ -136,6 +152,12 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None, s
                              "volume": c["qv"]} for c in candles],
                 "trades": trades, "price": e.market.price(symbol)}
 
+    @app.get("/api/network")
+    async def network(request: Request):
+        from .netutil import dashboard_urls
+        return {"host": settings.host, "port": settings.port, "urls": dashboard_urls(settings.host, settings.port),
+                "password_set": bool(settings.dashboard_password), "phone_ready": settings.host not in ("127.0.0.1", "localhost")}
+
     @app.get("/api/symbols")
     async def symbols(request: Request):
         e = eng(request)
@@ -147,7 +169,18 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None, s
         row = e.db.one("SELECT * FROM cycles WHERE id=?", (cid,))
         if not row:
             raise HTTPException(404)
-        return {"cycle": row, "events": e.db.cycle_events(cid)}
+        return {"cycle": row, "events": e.db.cycle_events(cid),
+                "reports": e.db.query("SELECT agent, data, ts FROM reports WHERE cycle_id=? ORDER BY id", (cid,))}
+
+    @app.get("/api/correlations")
+    async def correlations(request: Request, hours: int = 168):
+        return JSONResponse(_clean(await eng(request).desk.get_correlations(None, hours)))
+
+    @app.get("/api/liquidations")
+    async def liquidations(request: Request, minutes: float = 60):
+        e = eng(request)
+        return JSONResponse(_clean({"summary": e.radar.summary(minutes, 10), "recent": e.radar.recent(40),
+                                    "buckets": e.radar.buckets(120, 5)}))
 
     @app.get("/api/sims/{sid}")
     async def sim(request: Request, sid: int):
@@ -187,6 +220,9 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None, s
         elif action == "news":
             n = await e.news.refresh()
             return {"ok": True, "new": n}
+        elif action == "report":
+            rep = await e.make_daily_report()
+            return {"ok": True, "report": rep}
         else:
             raise HTTPException(404, "unknown action")
         return {"ok": True, "status": e.status()}
@@ -214,6 +250,10 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None, s
     @app.post("/api/alerts/{aid}/cancel")
     async def cancel_alert(request: Request, aid: int):
         return await eng(request).desk.cancel_alert(aid)
+
+    @app.post("/api/pending/{pid}/cancel")
+    async def cancel_pending(request: Request, pid: int):
+        return await eng(request).desk.cancel_pending_entry(pid)
 
     @app.post("/api/memories/{mid}/forget")
     async def forget(request: Request, mid: int):

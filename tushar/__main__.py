@@ -1,10 +1,13 @@
-"""Command line: `python -m tushar [run|doctor|cycle]`."""
+"""Command line: `python -m tushar [run|phone|doctor|cycle|login]`."""
 from __future__ import annotations
 
 import argparse
 import asyncio
 import logging
 import os
+import secrets
+import shutil
+import subprocess
 import sys
 import time
 
@@ -28,7 +31,7 @@ def setup_logging(level: str = "INFO") -> None:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
-def cmd_run(s: Settings) -> int:
+def cmd_run(s: Settings, phone: bool = False) -> int:
     problems = s.validate_startup()
     if problems:
         for p in problems:
@@ -36,13 +39,65 @@ def cmd_run(s: Settings) -> int:
         return 2
     import uvicorn
 
+    from .netutil import dashboard_urls
     from .server import create_app
+    if phone:
+        s.host = "0.0.0.0"
+        if not s.dashboard_password:  # a 6-digit PIN, kept across restarts so your phone stays logged in
+            from pathlib import Path
+            pin_file = Path(s.data_dir) / "phone_pin.txt"
+            pin_file.parent.mkdir(parents=True, exist_ok=True)
+            pin = pin_file.read_text().strip() if pin_file.exists() else ""
+            if not (pin.isdigit() and len(pin) == 6):
+                pin = f"{secrets.randbelow(10**6):06d}"
+                pin_file.write_text(pin)
+            s.dashboard_password = pin
     print(BANNER.format(v=__version__))
-    print(f"  Mode: {s.mode_label} | Brain: {s.brain} ({s.claude_model}) | Dashboard: http://{s.host}:{s.port}")
-    if s.host not in ("127.0.0.1", "localhost") and not s.dashboard_password:
-        print("  ! The dashboard is reachable from other machines and has no password. Set DASHBOARD_PASSWORD.")
-    uvicorn.run(create_app(s), host=s.host, port=s.port, log_level="warning")
+    print(f"  Mode: {s.mode_label} | Brain: {s.brain} ({s.claude_model}) | Desk: {s.desk_mode}")
+    print(f"  On this computer:  http://127.0.0.1:{s.port}")
+    urls = dashboard_urls(s.host, s.port)
+    if urls or phone:
+        print("  On your phone (same Wi-Fi):  " + ("   or   ".join(urls) if urls else
+              f"http://<this computer's IPv4 address>:{s.port}  (find it with `ipconfig`)"))
+        print(f"  Password / PIN: {s.dashboard_password}" if s.dashboard_password else
+              "  ! No DASHBOARD_PASSWORD set: anyone on your network can open the dashboard.")
+        print("  Tip: on the computer, click the phone icon in the dashboard to get a QR code.")
+        if sys.platform == "win32":
+            print("  Windows: if a firewall prompt appears, allow Python on PRIVATE networks.")
+    elif not phone:
+        print("  Want it on your phone? Start with:  run.bat phone   (or ./run.sh phone)")
+    print()
+    # Run the server on the default event loop: on Windows that is the Proactor loop, which can start
+    # the Claude Code subprocess (older uvicorn versions forced a loop that cannot).
+    config = uvicorn.Config(create_app(s), host=s.host, port=s.port, log_level="warning", loop="none")
+    try:
+        asyncio.run(uvicorn.Server(config).serve())
+    except KeyboardInterrupt:
+        pass
     return 0
+
+
+def cmd_login(s: Settings) -> int:
+    """Open Claude Code so you can log in with your Pro/Max account (no separate install needed)."""
+    path = s.claude_cli_path or shutil.which("claude")
+    if not path:
+        try:
+            import claude_agent_sdk
+            from pathlib import Path
+            base = Path(claude_agent_sdk.__file__).parent / "_bundled"
+            for name in ("claude.exe", "claude"):
+                if (base / name).exists():
+                    path = str(base / name)
+                    break
+        except ImportError:
+            pass
+    if not path:
+        print("Claude Code not found. Install it from https://claude.ai/download or `npm i -g @anthropic-ai/claude-code`.")
+        return 1
+    print("Opening Claude Code. Log in with your Claude Pro/Max account (type /login if it doesn't ask),")
+    print("then type /exit to come back. Tushar.ai will use that login.\n")
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    return subprocess.call([path], env=env)
 
 
 async def _doctor(s: Settings) -> int:
@@ -163,17 +218,26 @@ async def _cycle(s: Settings) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="tushar", description="Tushar.ai - Claude trades crypto futures")
-    ap.add_argument("command", nargs="?", default="run", choices=["run", "doctor", "cycle"],
-                    help="run the dashboard + bot (default), check the setup, or run one cycle in the terminal")
+    ap.add_argument("command", nargs="?", default="run", choices=["run", "phone", "doctor", "cycle", "login"],
+                    help="run = bot + dashboard (default); phone = same, reachable from your phone with a PIN; "
+                         "doctor = check the setup; cycle = one Claude cycle in the terminal; "
+                         "login = log in to Claude")
     ap.add_argument("--env", help="path to a .env file")
     ap.add_argument("--log", default=os.environ.get("LOG_LEVEL", "INFO"))
     args = ap.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):  # Windows consoles: never crash on an emoji
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     setup_logging(args.log)
     try:
         s = Settings.from_env(args.env)
     except ValueError as e:
         print(f"Config error: {e}")
         return 2
+    if args.command == "login":
+        return cmd_login(s)
     if args.command == "doctor":
         return asyncio.run(_doctor(s))
     if args.command == "cycle":
@@ -182,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
             print("\n".join(problems))
             return 2
         return asyncio.run(_cycle(s))
-    return cmd_run(s)
+    return cmd_run(s, phone=args.command == "phone")
 
 
 if __name__ == "__main__":

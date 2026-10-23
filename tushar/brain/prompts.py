@@ -31,6 +31,8 @@ Your goal: grow the account's equity over weeks with disciplined, asymmetric tra
    arbitrary %), reward:risk of at least the configured minimum, alignment with the higher timeframe or a
    strong reason to fade it. Size with risk_pct: about half of the max for B+ ideas, full max only when
    several independent reasons line up. Write a crisp thesis and label the setup.
+   If the idea is right but the price is not (extended, mid-range), use place_pending_entry at the level you
+   want instead of chasing; it fires through the same risk gate when price gets there.
 7. Doing nothing is a position. Most cycles should end without a new trade. Never trade to "do something".
 8. Finish EVERY cycle by calling publish_outlook: market regime, your bias, a short summary of what you
    see and why you acted or waited, the coins you are watching with levels, and next_check_minutes
@@ -78,7 +80,7 @@ def _fmt_ts(ts: float | None) -> str:
 
 def build_briefing(*, trigger: str, settings, portfolio: dict, overview: dict, scan: dict, news: dict,
                    closed: list[dict], memories: list[dict], stats: dict, outlook: dict | None,
-                   alerts: list[dict], usage: dict | None = None) -> str:
+                   alerts: list[dict], usage: dict | None = None, liquidations: dict | None = None) -> str:
     now = datetime.now(timezone.utc)
     s = settings
     parts = [
@@ -129,6 +131,13 @@ def build_briefing(*, trigger: str, settings, portfolio: dict, overview: dict, s
         parts.append("No headlines available (feeds unreachable or quiet)."
                      + (" Use WebSearch if you need current news." if s.claude_allow_web else ""))
     parts.append("")
+    if liquidations and liquidations.get("count"):
+        parts += ["## Liquidations, all Binance futures (last 60 min)",
+                  json.dumps({k: liquidations[k] for k in ("total_usd", "longs_liquidated_usd", "shorts_liquidated_usd",
+                                                           "dominant", "by_symbol")}, default=str), ""]
+    pend = portfolio.get("pending_entries") or []
+    if pend:
+        parts += ["## Your pending entries (fire automatically through the risk gate)", json.dumps(pend, default=str), ""]
     if alerts:
         parts += ["## Your active price alerts",
                   json.dumps([{"id": a["id"], "symbol": a["symbol"], "condition": a["condition"],
@@ -170,3 +179,111 @@ def build_briefing(*, trigger: str, settings, portfolio: dict, overview: dict, s
 def short_age(ts: float) -> str:
     mins = (time.time() - ts) / 60
     return f"{mins:.0f}m" if mins < 90 else f"{mins / 60:.1f}h"
+
+
+DAILY_PROMPT = """You are TUSHAR.AI, the autonomous crypto futures trader running this account. Write today's
+trading diary for the account owner. Use get_portfolio and get_trade_journal for the facts. Structure:
+1. Result: equity change, realized P&L, trades taken (wins/losses), best and worst trade.
+2. What worked and what didn't, honestly, with the specific trades.
+3. Market recap in 2-3 sentences.
+4. Plan and bias for the next 24h, with the levels you care about.
+Keep it under 250 words, plain text, no tables. Be direct and specific."""
+
+
+# ---------------------------------------------------------------------------- the team
+TEAM = {
+    "chartist": {
+        "name": "Chart Analyst", "emoji": "\U0001F4C8", "color": "#19d3f5",
+        "tools": ["get_market_overview", "scan_market", "analyze_symbol", "run_time_machine"],
+        "web": False,
+        "mission": "Read price structure. Check BTC first (it leads everything), then the strongest scanner hits "
+                   "and watchlist coins. Use analyze_symbol on the 3-5 most promising charts and run_time_machine on "
+                   "your best 1-2 ideas. Deliver at most 3 concrete trade ideas (entry, stop beyond real structure, "
+                   "target at the next level, setup name) and the coins to avoid.",
+    },
+    "macro": {
+        "name": "News & Macro Analyst", "emoji": "\U0001F4F0", "color": "#f5b13d",
+        "tools": ["get_news", "get_market_overview"],
+        "web": True,
+        "mission": "Judge the news and macro backdrop: what is moving crypto right now, scheduled event risk in the "
+                   "next 24h (Fed, CPI, jobs data, token unlocks, ETF flows), regulation, hacks, listings, and overall "
+                   "sentiment (Fear & Greed). Map each catalyst to specific coins and a direction. Say clearly if "
+                   "trading should be lighter because of event risk.",
+    },
+    "flow": {
+        "name": "Derivatives & Flow Analyst", "emoji": "\U0001F9EE", "color": "#8b6cff",
+        "tools": ["get_derivatives", "get_liquidations", "analyze_symbol", "get_market_overview"],
+        "web": False,
+        "mission": "Read positioning: funding (crowding), open interest changes (new money vs short covering), "
+                   "long/short accounts, order book imbalance and the liquidation radar. Find crowded trades likely "
+                   "to squeeze, liquidation cascades that may have exhausted a move, and moves confirmed by fresh OI.",
+    },
+    "risk": {
+        "name": "Risk Officer", "emoji": "\U0001F6E1️", "color": "#f0475b",
+        "tools": ["get_portfolio", "get_correlations", "run_time_machine", "get_trade_journal"],
+        "web": False,
+        "mission": "Be the risk officer and devil's advocate. Read the analysts' reports below and the portfolio. "
+                   "For every proposed idea, make the strongest case AGAINST it. Check correlation and real BTC-beta "
+                   "exposure (get_correlations), event risk, the trader's recent results and lessons, and the daily "
+                   "loss budget. Recommend a max risk_pct for this cycle and veto ideas that should not be taken.",
+    },
+}
+PM_META = {"name": "Head Trader", "emoji": "\U0001F9E0", "color": "#18c98a"}
+
+ANALYST_PROMPT = """You are the {name} on the Tushar Capital desk: a team of AI specialists working for the head
+trader, Tushar (also Claude), who runs a Binance USD-M futures account and makes every trading decision. You
+cannot trade. Your job: {mission}
+
+Work fast and focused on the next 1-24 hours. Use at most about {turns} tool calls. Then call submit_report
+exactly once with your conclusions: specific symbols, levels and numbers, no filler. Your text is streamed to
+the desk's dashboard, so think out loud briefly."""
+
+PM_TEAM_ADDENDUM = """
+
+# Your desk
+This cycle your analysts already did the legwork; their reports are in the briefing under "Your desk's
+reports". Weigh them like a portfolio manager: where they agree, where they conflict, and what the Risk
+Officer objected to. You are accountable for the decision. Verify the key claims behind any trade with your
+own tools (analyze_symbol, plan_trade) before opening it. When an analyst's idea needs a better entry
+price, use place_pending_entry rather than buying or selling at market. You may overrule the Risk Officer's veto only with
+an explicit reason in the thesis. In publish_outlook, mention which analysts' views drove the decision."""
+
+REPORT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "stance": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
+        "confidence": {"type": "number", "description": "0-1"},
+        "headline": {"type": "string", "description": "one line"},
+        "summary": {"type": "string", "description": "2-5 sentences"},
+        "key_points": {"type": "array", "items": {"type": "string"}},
+        "ideas": {"type": "array", "items": {"type": "object", "properties": {
+            "symbol": {"type": "string"}, "side": {"type": "string", "enum": ["long", "short"]},
+            "entry": {"type": "number"}, "stop": {"type": "number"}, "target": {"type": "number"},
+            "setup": {"type": "string"}, "conviction": {"type": "integer", "description": "1-5"},
+            "rationale": {"type": "string"}}}},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "veto": {"type": "array", "items": {"type": "string"}, "description": "risk officer: ideas/symbols to skip"},
+        "max_risk_pct": {"type": "number", "description": "risk officer: max risk per trade this cycle"},
+    },
+    "required": ["stance", "confidence", "headline", "summary"],
+}
+
+
+def team_section(reports: dict[str, dict]) -> str:
+    """Render the analysts' reports for the head trader's briefing."""
+    lines = ["## Your desk's reports (this cycle)"]
+    for key in ("chartist", "macro", "flow", "risk"):
+        rep = reports.get(key)
+        meta = TEAM[key]
+        if not rep:
+            continue
+        if rep.get("error"):
+            lines.append(f"### {meta['name']}: unavailable ({rep['error']})")
+            continue
+        lines.append(f"### {meta['name']}: {rep.get('stance', '?')} (confidence {rep.get('confidence', '?')}) - "
+                     f"{rep.get('headline', '')}")
+        lines.append(rep.get("summary", ""))
+        body = {k: rep[k] for k in ("key_points", "ideas", "warnings", "veto", "max_risk_pct") if rep.get(k)}
+        if body:
+            lines.append(json.dumps(body, default=str))
+    return "\n".join(lines)

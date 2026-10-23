@@ -12,3 +12,4 @@ venv/
 build/
 dist/
 .DS_Store
+phone_pin.txt

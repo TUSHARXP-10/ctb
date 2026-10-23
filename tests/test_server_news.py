@@ -61,3 +61,23 @@ def test_password_protects_api(tmp_path):
         assert c.post("/api/login", json={"password": "nope"}).status_code == 401
         assert c.post("/api/login", json={"password": "s3cret"}).status_code == 200
         assert c.get("/api/state").status_code == 200
+
+
+def test_network_urls(tmp_path):
+    from tushar.netutil import dashboard_urls
+    assert dashboard_urls("127.0.0.1", 8000) == []
+    assert dashboard_urls("192.168.1.5", 8000) == ["http://192.168.1.5:8000"]
+    assert all(u.startswith("http://") and u.endswith(":8000") for u in dashboard_urls("0.0.0.0", 8000))
+    with TestClient(_app(tmp_path)) as c:
+        n = c.get("/api/network").json()
+        assert n["phone_ready"] is False and n["urls"] == []
+        assert c.get("/static/manifest.webmanifest").status_code == 200
+
+
+def test_session_survives_restart(tmp_path):
+    with TestClient(_app(tmp_path, dashboard_password="1234")) as c:
+        c.post("/api/login", json={"password": "1234"})
+        cookie = c.cookies.get("tushar_session")
+    with TestClient(_app(tmp_path, dashboard_password="1234")) as c2:
+        c2.cookies.set("tushar_session", cookie)
+        assert c2.get("/api/state").status_code == 200

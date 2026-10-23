@@ -51,9 +51,17 @@ CREATE INDEX IF NOT EXISTS idx_news_ts ON news(ts);
 CREATE TABLE IF NOT EXISTS outlooks (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, cycle_id INTEGER, data TEXT);
 CREATE TABLE IF NOT EXISTS sims (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, symbol TEXT, side TEXT, params TEXT, result TEXT);
 CREATE TABLE IF NOT EXISTS chat (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, role TEXT, text TEXT);
+CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, cycle_id INTEGER, agent TEXT, data TEXT);
+CREATE INDEX IF NOT EXISTS idx_reports_cycle ON reports(cycle_id);
+CREATE TABLE IF NOT EXISTS pending_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, created_at REAL, symbol TEXT, side TEXT, entry REAL, stop_loss REAL,
+    take_profit REAL, risk_pct REAL, leverage INTEGER, confidence REAL, setup TEXT, thesis TEXT, condition TEXT,
+    expires_at REAL, status TEXT, cycle_id INTEGER, triggered_at REAL, result TEXT
+);
+CREATE TABLE IF NOT EXISTS daily_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, day TEXT, text TEXT, stats TEXT);
 """
 
-JSON_COLUMNS = {"actions", "data", "tm", "extra", "tags", "symbols", "params", "result"}
+JSON_COLUMNS = {"actions", "data", "tm", "extra", "tags", "symbols", "params", "result", "stats"}
 
 
 class DB:

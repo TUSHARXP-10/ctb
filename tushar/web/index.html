@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tushar.ai</title>
   <meta name="theme-color" content="#07090f">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Tushar.ai">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%238b6cff'/><stop offset='1' stop-color='%2319d3f5'/></linearGradient></defs><rect width='64' height='64' rx='16' fill='url(%23g)'/><text x='32' y='44' font-size='34' font-family='Arial' font-weight='900' text-anchor='middle' fill='%2307090f'>T</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
@@ -32,6 +38,8 @@
     <button class="btn primary" id="btn-run" title="Run a Claude cycle now">&#9654; <span class="lbl">Run now</span></button>
     <button class="btn" id="btn-pause" title="Pause / resume new trades">&#10074;&#10074; <span class="lbl">Pause</span></button>
     <button class="btn danger" id="btn-kill" title="Close everything and stop">&#9888; <span class="lbl">Kill</span></button>
+    <button class="btn icon-btn" id="btn-phone" title="Open on your phone">&#128241;</button>
+    <button class="btn icon-btn" id="btn-voice" title="Voice announcements">&#128263;</button>
     <button class="btn icon-btn" id="btn-settings" title="Settings">&#9881;</button>
   </div>
 </header>
@@ -47,6 +55,13 @@
     <div class="kpi"><div class="label">Win rate</div><div class="value" id="k-winrate">-</div><div class="sub" id="k-winrate-sub">&nbsp;</div></div>
     <div class="kpi"><div class="label">Total P&amp;L</div><div class="value" id="k-total">-</div><div class="sub" id="k-total-sub">&nbsp;</div></div>
     <div class="kpi"><div class="label">Open risk</div><div class="value" id="k-risk">-</div><div class="sub" id="k-risk-sub">&nbsp;</div></div>
+  </section>
+
+  <section class="card warroom" id="warroom-card">
+    <div class="card-h"><h3>&#9876;&#65039; War Room</h3><span class="count" id="team-mode">-</span>
+      <span class="muted" style="font-size:12px" id="team-sub">Tushar Capital: three analysts in parallel, a risk officer who argues against every idea, and the head trader who decides.</span>
+      <div class="spacer"></div><span class="muted mono" style="font-size:11.5px" id="team-cycle"></span></div>
+    <div class="card-b"><div class="team-grid" id="team"></div></div>
   </section>
 
   <section class="grid">
@@ -70,7 +85,8 @@
             <button data-tab="orders">Orders <span class="count" id="c-orders">0</span></button>
             <button data-tab="journal">Journal <span class="count" id="c-journal">0</span></button>
             <button data-tab="cycles">Cycles</button>
-            <button data-tab="alerts">Alerts <span class="count" id="c-alerts">0</span></button>
+            <button data-tab="alerts">Alerts &amp; entries <span class="count" id="c-alerts">0</span></button>
+            <button data-tab="reports">Daily reports</button>
           </div>
         </div>
         <div class="card-b flush scroll" style="max-height:420px" id="book-body"></div>
@@ -102,6 +118,18 @@
       <div class="card-h"><h3>&#128240; News</h3><span class="count" id="news-count">0</span><div class="spacer"></div><button class="btn small" id="btn-news">Refresh</button></div>
       <div id="fng"></div>
       <div class="card-b flush scroll" style="max-height:330px" id="news"></div>
+    </div>
+
+    <div class="span-6 card">
+      <div class="card-h"><h3>&#128165; Liquidation radar</h3><span class="count" id="liq-status">-</span><div class="spacer"></div>
+        <span class="muted" style="font-size:11.5px">all Binance futures · last 60 min</span></div>
+      <div class="card-b" id="liq-top"></div>
+      <div class="card-b flush scroll" style="max-height:230px" id="liq-feed"></div>
+    </div>
+    <div class="span-6 card">
+      <div class="card-h"><h3>&#128279; Correlation &amp; exposure</h3><div class="spacer"></div>
+        <span class="muted" style="font-size:11.5px">hourly returns, 7 days</span><button class="btn small" id="btn-corr">Refresh</button></div>
+      <div class="card-b scroll" id="corr" style="max-height:420px"><div class="empty">Loading...</div></div>
     </div>
 
     <div class="span-6 card">
@@ -144,9 +172,22 @@
     <div class="modal-b" id="cycle-body"></div>
   </div>
 </div>
+<div class="overlay" id="phone-overlay">
+  <div class="modal" style="width:min(460px,100%)">
+    <div class="modal-h"><h3>&#128241; Open on your phone</h3><div class="spacer"></div><button class="btn small" data-close>Close</button></div>
+    <div class="modal-b" id="phone-body"></div>
+  </div>
+</div>
+<div class="overlay" id="agent-overlay">
+  <div class="modal">
+    <div class="modal-h"><h3 id="agent-title">Agent</h3><div class="spacer"></div><button class="btn small" data-close>Close</button></div>
+    <div class="modal-b" id="agent-body"></div>
+  </div>
+</div>
 <div class="toasts" id="toasts"></div>
 
 <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+<script src="/static/vendor/qrcode.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

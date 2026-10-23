@@ -10,10 +10,9 @@ import logging
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
 
 from . import timemachine as tmach
-from .exchange.base import Account, ExchangeError, Position
+from .exchange.base import Account, ExchangeError
 from .market import MarketService, closed_only, r
 from .risk import EntryRequest, RiskContext, RiskManager, open_risk_usd
 
@@ -76,6 +75,7 @@ class Desk:
         self.scanner = scanner
         self.news = news
         self.risk = risk
+        self.radar = None          # LiquidationRadar, attached by the engine
         self.cycle_id: int | None = None
         self.actor = "claude"
         self.requested_next_check: float | None = None
@@ -211,6 +211,10 @@ class Desk:
             "entries_today": len(self.db.trades_since(utc_day_start())),
             "max_entries_per_day": self.s.max_trades_per_day,
             "positions": positions,
+            "pending_entries": [{"id": p["id"], "symbol": p["symbol"], "side": p["side"], "entry": p["entry"],
+                                 "stop_loss": p["stop_loss"], "take_profit": p["take_profit"],
+                                 "expires_in_hours": round((p["expires_at"] - time.time()) / 3600, 1)}
+                                for p in self.pending_entries()],
             "status": self.status_line(),
         }
 
@@ -233,6 +237,8 @@ class Desk:
         hits = [h for h in (self.scanner.last.get("hits") or []) if h["symbol"] == symbol]
         if hits:
             snap["scanner_hits"] = [{"setup": h["setup"], "direction": h["direction"]} for h in hits]
+        if self.radar:
+            snap["liquidations_60m"] = self.radar.symbol_summary(symbol, 60)
         news = self.news.latest(hours=24, symbol=symbol, limit=6)
         if news:
             snap["news_24h"] = [{"title": n["title"], "source": n["source"],
@@ -257,6 +263,69 @@ class Desk:
                           for n in items],
             "feeds": self.news.status,
         }
+
+    async def get_liquidations(self, minutes: float = 60) -> dict:
+        if not self.radar:
+            return {"status": "radar off"}
+        minutes = max(5, min(float(minutes or 60), 360))
+        out = self.radar.summary(minutes)
+        out["how_to_read"] = ("longs_liquidated = forced selling (often marks local bottoms after a flush); "
+                              "shorts_liquidated = forced buying (squeeze fuel).")
+        return out
+
+    async def get_derivatives(self) -> dict:
+        """Market-wide positioning: funding extremes, open interest and long/short accounts."""
+        universe = self.market.universe(max(self.s.scan_top_n, 20))
+        rows = []
+        for s in universe:
+            m = self.market.marks.get(s) or {}
+            t = self.market.tickers.get(s) or {}
+            if "funding_rate" in m:
+                rows.append({"symbol": s, "funding_pct": r(m["funding_rate"] * 100, 4),
+                             "chg_24h": r(t.get("change_pct"), 3)})
+        rows.sort(key=lambda x: x["funding_pct"])
+        avg = sum(x["funding_pct"] for x in rows) / len(rows) if rows else None
+
+        async def oi(sym: str):
+            hist = await self.market._safe(self.market.source.open_interest_hist(sym, "1h", 25))
+            lsr = await self.market._safe(self.market.source.long_short_ratio(sym, "1h"))
+            out = {"symbol": sym}
+            if hist and len(hist) > 5:
+                out["oi_usd_m"] = r(hist[-1]["oi_value"] / 1e6, 5)
+                out["oi_change_4h_pct"] = r((hist[-1]["oi"] / hist[-5]["oi"] - 1) * 100, 3)
+                out["oi_change_24h_pct"] = r((hist[-1]["oi"] / hist[0]["oi"] - 1) * 100, 3)
+            if lsr:
+                out["long_accounts_pct"] = r(lsr["long_pct"], 3)
+            t = self.market.tickers.get(sym) or {}
+            out["price_chg_24h"] = r(t.get("change_pct"), 3)
+            return out
+
+        open_syms = [t["symbol"] for t in self.db.open_trades()]
+        focus = list(dict.fromkeys(self.s.watchlist[:6] + open_syms))[:8]
+        oi_rows = await asyncio.gather(*(oi(s) for s in focus))
+        return {
+            "avg_funding_pct_per_8h": r(avg, 4) if avg is not None else None,
+            "most_positive_funding": rows[-6:][::-1], "most_negative_funding": rows[:6],
+            "open_interest": oi_rows,
+            "liquidations_60m": {k: v for k, v in (await self.get_liquidations(60)).items()
+                                 if k in ("total_usd", "longs_liquidated_usd", "shorts_liquidated_usd", "dominant",
+                                          "by_symbol", "status")},
+            "how_to_read": ("Price up + OI up = new longs (trend fuel); price up + OI down = short covering (weaker). "
+                            "Funding above ~0.03%/8h = crowded longs; negative = crowded shorts."),
+        }
+
+    async def get_correlations(self, symbols: list[str] | None = None, hours: int = 168) -> dict:
+        from .analytics import correlation_matrix, crowded_pairs, exposure
+        acct = await self.account()
+        syms = [s.upper() for s in (symbols or [])] or list(dict.fromkeys(
+            ["BTCUSDT"] + self.s.watchlist + [p.symbol for p in acct.positions]))
+        syms = [s for s in syms if s in self.market.symbols][:16]
+        hours = max(48, min(int(hours or 168), 720))
+        kl = await asyncio.gather(*(self.market.klines(s, "1h", hours + 1) for s in syms))
+        corr = correlation_matrix({s: [c["c"] for c in k] for s, k in zip(syms, kl)})
+        corr["exposure"] = exposure([p.to_dict() for p in acct.positions], corr.get("beta", {}), acct.equity)
+        corr["highly_correlated_pairs"] = crowded_pairs(corr)
+        return corr
 
     async def run_time_machine(self, symbol: str, side: str, stop_loss: float, take_profit: float,
                                entry: float | None = None, horizon_hours: float = 24) -> dict:
@@ -571,6 +640,55 @@ class Desk:
         self.db.update("alerts", int(alert_id), {"status": "cancelled"})
         self.bus.publish("alerts", self.active_alerts())
         return {"status": "CANCELLED", "alert_id": alert_id}
+
+    # ---------------------------------------------------------------- pending entries
+    async def place_pending_entry(self, symbol: str, side: str, entry: float, stop_loss: float, take_profit: float,
+                                  thesis: str, risk_pct: float | None = None, leverage: int | None = None,
+                                  confidence: float | None = None, setup: str = "", expires_hours: float = 12) -> dict:
+        symbol, side = symbol.upper(), side.lower()
+        if self.market.info(symbol) is None:
+            return {"status": "ERROR", "error": f"unknown symbol {symbol}"}
+        if side not in ("long", "short"):
+            return {"status": "ERROR", "error": "side must be long or short"}
+        entry, stop_loss, take_profit = float(entry), float(stop_loss), float(take_profit)
+        ok = (stop_loss < entry < take_profit) if side == "long" else (take_profit < entry < stop_loss)
+        if not ok:
+            return {"status": "ERROR", "error": "for a long: stop < entry < target; for a short: target < entry < stop"}
+        price = await self._fresh_price(symbol)
+        if not price:
+            return {"status": "ERROR", "error": "no live price"}
+        if abs(entry / price - 1) > 0.15:
+            return {"status": "ERROR", "error": f"entry {entry:g} is more than 15% from the price {price:g}"}
+        rr = abs(take_profit - entry) / abs(entry - stop_loss)
+        if rr < self.s.min_reward_risk:
+            return {"status": "ERROR", "error": f"reward:risk at the entry is {rr:.2f}, minimum {self.s.min_reward_risk}"}
+        active = self.db.query("SELECT id FROM pending_entries WHERE status='active'")
+        if len(active) >= 10:
+            return {"status": "ERROR", "error": "10 pending entries max: cancel some first"}
+        if self.db.one("SELECT id FROM pending_entries WHERE status='active' AND symbol=?", (symbol,)):
+            return {"status": "ERROR", "error": f"{symbol} already has a pending entry; cancel it first"}
+        condition = "above" if entry > price else "below"
+        hours = max(0.5, min(float(expires_hours or 12), 72))
+        pid = self.db.insert("pending_entries", {
+            "created_at": time.time(), "symbol": symbol, "side": side, "entry": entry, "stop_loss": stop_loss,
+            "take_profit": take_profit, "risk_pct": risk_pct, "leverage": leverage, "confidence": confidence,
+            "setup": setup or "pending_entry", "thesis": thesis[:1500], "condition": condition,
+            "expires_at": time.time() + hours * 3600, "status": "active", "cycle_id": self.cycle_id})
+        self._record("pending_entry", {"symbol": symbol, "side": side, "entry": entry, "id": pid})
+        self.bus.publish("pending", self.pending_entries())
+        kind = ("limit" if (side == "long") == (condition == "below") else "breakout (stop)")
+        return {"status": "PENDING", "pending_id": pid, "symbol": symbol, "side": side, "entry": entry,
+                "triggers_when_price": f"{condition} {entry:g} (now {price:g})", "type": kind,
+                "expires_in_hours": hours, "reward_risk_at_entry": round(rr, 2),
+                "note": "When it triggers, the full risk gate and Time Machine run again at the live price."}
+
+    async def cancel_pending_entry(self, pending_id: int) -> dict:
+        self.db.update("pending_entries", int(pending_id), {"status": "cancelled"})
+        self.bus.publish("pending", self.pending_entries())
+        return {"status": "CANCELLED", "pending_id": pending_id}
+
+    def pending_entries(self) -> list[dict]:
+        return self.db.query("SELECT * FROM pending_entries WHERE status='active' ORDER BY created_at DESC")
 
     def active_alerts(self) -> list[dict]:
         return self.db.query("SELECT * FROM alerts WHERE status='active' ORDER BY created_at DESC")

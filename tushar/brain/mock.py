@@ -15,9 +15,52 @@ class MockBrain:
     def __init__(self, engine):
         self.engine = engine
 
-    async def run_cycle(self, briefing: str, cycle_id: int) -> dict:
+    async def _mock_team(self, cycle_id: int) -> None:
+        """Rule-based stand-ins for the analysts so the War Room works offline."""
+        eng, desk = self.engine, self.engine.desk
+        for k in ("chartist", "macro", "flow"):
+            eng.agent_status(cycle_id, k, "working")
+        scan = await desk.scan_market()
+        hits = [h for h in scan["hits"] if h["direction"] in ("long", "short")]
+        longs = sum(h["direction"] == "long" for h in hits)
+        shorts = len(hits) - longs
+        stance = "bullish" if longs > shorts else "bearish" if shorts > longs else "neutral"
+        eng.agent_report(cycle_id, "chartist", {
+            "stance": stance, "confidence": 0.5, "headline": f"[mock] {len(hits)} directional setups ({longs}L/{shorts}S)",
+            "summary": "[mock] Rule-based chart read from the scanner.",
+            "ideas": [{"symbol": h["symbol"], "side": h["direction"], "setup": h["setup"], "conviction": min(5, h["score"])}
+                      for h in hits[:3]]})
+        news = await desk.get_news(hours=12)
+        fng = news.get("fear_greed") or {}
+        eng.agent_report(cycle_id, "macro", {
+            "stance": "neutral", "confidence": 0.3,
+            "headline": f"[mock] {len(news['headlines'])} headlines, Fear & Greed {fng.get('value', 'n/a')}",
+            "summary": "[mock] No language model: headlines counted, not read."})
+        der = await desk.get_derivatives()
+        liq = der.get("liquidations_60m") or {}
+        eng.agent_report(cycle_id, "flow", {
+            "stance": "neutral", "confidence": 0.4,
+            "headline": f"[mock] avg funding {der.get('avg_funding_pct_per_8h')}%, liquidations {liq.get('dominant', 'n/a')}",
+            "summary": "[mock] Positioning summary from funding and the liquidation radar."})
+        eng.agent_status(cycle_id, "risk", "working")
+        corr = await desk.get_correlations()
+        ex = corr.get("exposure", {})
+        eng.agent_report(cycle_id, "risk", {
+            "stance": "neutral", "confidence": 0.5,
+            "headline": f"[mock] BTC-beta net exposure {ex.get('btc_beta_net_x_equity', 0)}x equity",
+            "summary": "[mock] Exposure and correlation check.", "max_risk_pct": self.engine.s.risk_per_trade_pct,
+            "warnings": [f"{p['a']}/{p['b']} correlated {p['corr']}" for p in corr.get("highly_correlated_pairs", [])[:3]]})
+
+    async def run_cycle(self, briefing: str, cycle_id: int, trigger: str = "") -> dict:
         desk, bus = self.engine.desk, self.engine.bus
         calls = []
+        from .team import is_team_trigger
+        if self.engine.s.desk_mode == "team" and is_team_trigger(trigger):
+            self.engine.team_mode_note(cycle_id, "team (mock)")
+            await self._mock_team(cycle_id)
+        else:
+            self.engine.team_mode_note(cycle_id, "solo (mock)")
+        self.engine.agent_status(cycle_id, "pm", "working")
 
         def think(text: str) -> None:
             bus.publish("thought", {"cycle_id": cycle_id, "text": f"[mock] {text}"})
@@ -68,7 +111,11 @@ class MockBrain:
         await call("publish_outlook", desk.publish_outlook("mock regime", "neutral", f"[mock] {summary}",
                                                            [{"symbol": "BTCUSDT", "bias": "neutral", "note": "mock"}]))
         think(summary)
+        self.engine.agent_status(cycle_id, "pm", "done")
         return {"summary": summary, "num_turns": len(calls), "duration_ms": 0, "tool_calls": calls}
+
+    async def daily_report(self, context: str) -> str:
+        return "[mock brain] Daily report:\n" + context[:1500]
 
     async def chat(self, message: str, history: list[dict]) -> str:
         pf = await self.engine.desk.get_portfolio()

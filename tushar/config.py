@@ -68,6 +68,13 @@ RUNTIME_RULES: dict[str, tuple[type, Any, Any]] = {
     "blocked_symbols": (list, None, None),
     "big_move_pct": (float, 0.3, 20.0),
     "chat_can_trade": (bool, None, None),
+    "desk_mode": (str, None, None),
+    "analyst_model": (str, None, None),
+    "analyst_max_turns": (int, 4, 30),
+    "team_on_events": (bool, None, None),
+    "telegram_cycle_summaries": (bool, None, None),
+    "daily_report": (bool, None, None),
+    "daily_report_hour_utc": (int, 0, 23),
 }
 
 
@@ -90,6 +97,9 @@ class Settings:
     dashboard_password: str = ""
     data_dir: str = str(ROOT / "data")
     sim_seed: int = 7
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    liquidation_radar: bool = True
 
     # ---- runtime (dashboard-editable) ----
     claude_model: str = "sonnet"
@@ -118,6 +128,13 @@ class Settings:
     blocked_symbols: list[str] = field(default_factory=list)
     big_move_pct: float = 2.0
     chat_can_trade: bool = False
+    desk_mode: str = "team"             # team = analysts + risk officer + head trader; solo = head trader only
+    analyst_model: str = "haiku"        # model for the analysts (the head trader uses claude_model)
+    analyst_max_turns: int = 10
+    team_on_events: bool = False        # run the whole team on alert/stop-hit cycles too
+    telegram_cycle_summaries: bool = False
+    daily_report: bool = True
+    daily_report_hour_utc: int = 0
 
     # ------------------------------------------------------------------
     @classmethod
@@ -169,6 +186,8 @@ class Settings:
             raise ValueError("TRADING_MODE must be demo, testnet, live or paper")
         if self.brain not in ("agent", "cli", "mock"):
             raise ValueError("BRAIN must be agent, cli or mock")
+        if self.desk_mode not in ("team", "solo"):
+            self.desk_mode = "team"
         if self.market_source not in ("binance", "sim"):
             raise ValueError("MARKET_SOURCE must be binance or sim")
 
@@ -199,7 +218,7 @@ class Settings:
     def public_dict(self) -> dict[str, Any]:
         """Everything safe to show on the dashboard (never the keys)."""
         d = asdict(self)
-        for secret in ("binance_api_key", "binance_api_secret", "dashboard_password"):
+        for secret in ("binance_api_key", "binance_api_secret", "dashboard_password", "telegram_bot_token"):
             d[secret] = bool(d[secret])
         d["mode_label"] = self.mode_label
         d["editable"] = list(RUNTIME_RULES)
