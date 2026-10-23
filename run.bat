@@ -9,9 +9,10 @@ call .venv\Scripts\activate.bat
 if not exist .venv\.deps (
   echo Installing dependencies...
   python -m pip install -q --upgrade pip
-  pip install -q -r requirements.txt
   type nul > .venv\.deps
 )
+REM Quick when everything is already installed; picks up new packages after a git pull.
+pip install -q --disable-pip-version-check -r requirements.txt
 if not exist .env (
   copy .env.example .env >nul
   echo Created .env - open it, add your Binance demo API key/secret, then run: run.bat doctor
